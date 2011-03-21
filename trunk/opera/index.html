@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+  </head>
+  <body>
+	<script>
+	  opera.extension.onconnect = function(e) {
+	    var rewriterules = null;
+        try { rewriterules = localStorage['rewriterules'] || ''; } catch(e) {};
+	    event.source.postMessage({ command: 'setup', rewriterules: rewriterules });
+	  };
+	</script>
+  </body>
+</html>
