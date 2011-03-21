@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+  <head>
+	<meta charset="UTF-8">
+	<title>Options for Link Tweak extension</title>
+	<style>
+	  body { font-family: serif; }
+	  h1 { text-shadow: 2px 2px 4px #888; }
+	  #rewrite-rules { border-spacing:4px; }
+	  #rewrite-rules th { border-bottom: solid 1px black; font-size:14px; text-align:left; }
+	  #rewrite-rules td { border-bottom: solid 1px #ccc; line-height:1; }
+	  #rewrite-rules td.button { border-bottom: none; }
+	  #rewrite-rules input {
+	    border:none; margin:0; padding:2px 0; background-color:#f8f8f8;
+	    width:100%; font-size:14px; outline:none;
+	  }
+	  .cond { width: 300px; }
+	  .from { width: 200px; }
+	  .to   { width: 200px; }
+	  .delete {
+	    display: inline-block; width:18px; height:18px; text-align:center;
+	    border: solid 1px red; border-radius:9px;
+	    color:white; font-weight:bold; font-size:18px; line-height:18px;
+	    text-shadow: -1px -1px 1px #fcc, 1px 1px 1px black; background-color:#fcc;
+	    box-shadow: inset 0 -13px 2px red, 1px 1px 0 0 #844;
+	  }
+	  #save { margin-right:50px; }
+	  .example { width:715px; margin-top:20px; font-size:14px; }
+	  .example table { margin:8px 0 0 16px; font-size:12px; }
+	  .example caption { text-align:left; padding-bottom:4px; font-size:14px; }
+	  .example th { padding-left:16px; text-align:left; width:180px; }
+	</style>
+  </head>
+  <body>
+	<h1><img src="icon-64.png"> Options for Link Tweak extension</h1>
+	<table id="rewrite-rules">
+	  <thead>
+		<tr>
+		  <th class="cond">Rewrite links matched with:</th>
+		  <th class="from">Rewrite pattern</th>
+		  <th class="to">Substitution</th>
+		</tr>
+	  </thead>
+	  <tbody id="rules">
+	  </tbody>
+	</table>
+	<div style="width:715px; text-align:right; font-size:14px;">
+	  <a id="add-row" href="#">Add row</a>
+	</div>
+	<div style="width:715px; text-align:center;">
+	  <input id="save"  type="button" value="Save"  disabled="disabled">
+	  <input id="reset" type="button" value="Reset" disabled="disabled">
+	</div>
+  </body>
+  <div class="example">
+	<div>&quot;Rewrite links matched with:&quot; and &quot;Rewrite pattern&quot; are <a href="https://developer.mozilla.org/en/Core_JavaScript_1.5_Guide/Regular_Expressions" target="_blank">regular expressions</a>. For example:</div>
+	<table class="example">
+	  <caption>
+		http://code.google.com/apis/… &rArr; http://code.google.com/intl/en/apis/…
+	  </caption>
+	  <tr><th>Rewrite links matched with:</th><td>^http://code\.google\.com/apis/</td></tr>
+	  <tr><th>Rewrite pattern:</th><td>/apis/</td></tr>
+	  <tr><th>Substitution:</th><td>/intl/en/apis/</td></tr>
+	</table>
+	<table class="example">
+	  <caption>
+		http://maps.google.com/maps?hl=en… &rArr; http://maps.google.com/maps?hl=ja…
+	  </caption>
+	  <tr><th>Rewrite links matched with:</th><td>^http://maps\.google\.co\.jp/maps</td></tr>
+	  <tr><th>Rewrite pattern:</th><td>([?&amp;])hl=en</td></tr>
+	  <tr><th>Substitution:</th><td>$1hl=ja</td></tr>
+	</table>
+  </div>
+  <script src="Options.js"></script>
+</html>

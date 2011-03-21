@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" version="1.0-a">
+  <name>Link Tweak</name>
+  <description>Rewrite link url (href attribute of A tag) with flexible rules.</description>
+  <author href="http://webos-goodies.jp" email="contact@webos-goodies.jp">WebOS Goodies</author>
+  <icon src="icon-64.png"/>
+</widget>
