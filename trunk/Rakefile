@@ -7,9 +7,10 @@ CLOSURE_LIB_DIR = File.expand_path('closure-library')
 LIB_DIRS        = ['scripts']
 ALL_SCRIPTS     = LIB_DIRS.map{|d| FileList[File.join(d, '*.js')] }.flatten
 EXTERNS         = FileList['externs/*.js']
-OPERA_TARGETS   = ['opera/includes/Content.js', 'opera/Options.js',
-                   'opera/options.html', 'opera/icon-64.png']
-CHROME_TARGETS  = ['chrome/Content.js', 'chrome/Options.js', 'chrome/options.html',
+OPERA_TARGETS   = ['opera/Background.js', 'opera/includes/Content.js', 'opera/Options.js',
+                   'opera/index.html', 'opera/options.html', 'opera/icon-64.png']
+CHROME_TARGETS  = ['chrome/Background.js', 'chrome/Content.js', 'chrome/Options.js',
+                   'chrome/index.html', 'chrome/options.html',
                    'chrome/icon-128.png', 'chrome/icon-48.png', 'chrome/icon-64.png']
 PACKAGES        = ['packages/linktweak.oex', 'packages/linktweak.zip']
 
