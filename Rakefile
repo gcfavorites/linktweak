@@ -59,14 +59,18 @@ end
 
 file 'packages/linktweak.oex' => FileList['opera/**/*'] do |t|
   mkdir_p(File.dirname(t.name), :verbose => false)
+  rm_f(t.name)
+  files = t.prerequisites.map{|fname| fname.sub(/^opera\//, '') }
   Dir.chdir('opera') do
-    sh("zip -r ../#{t.name} *")
+    sh("zip ../#{t.name} " + files.join(' '))
   end
 end
 
 file 'packages/linktweak.zip' => FileList['chrome/**/*'] do |t|
   mkdir_p(File.dirname(t.name), :verbose => false)
+  rm_f(t.name)
+  files = t.prerequisites.map{|fname| fname.sub(/^chrome\//, '') }
   Dir.chdir('chrome') do
-    sh("zip -r ../#{t.name} *")
+    sh("zip ../#{t.name} " + files.join(' '))
   end
 end

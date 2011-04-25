@@ -110,11 +110,16 @@ linktweak.Content.prototype.onMouseDown = function(e) {
 	  var href   = goog.Uri.parse(el.href)
 	  var target = href.getParameterValue('url');
 	  if(target) {
-		href.setParameterValue('url', this.rewriteUrl_(window.location.href, target));
-		el.href = href.toString();
+        if(target = this.rewriteUrl_(window.location.href, target)) {
+		  href.setParameterValue('url', target);
+		  el.href = href.toString();
+        }
 	  }
 	} else {
-	  el.href = this.rewriteUrl_(window.location.href, el.href);
+      var url = this.rewriteUrl_(window.location.href, el.href);
+      if(url) {
+	    el.href = url;
+      }
 	}
   }
 };
@@ -173,7 +178,7 @@ linktweak.Content.prototype.rewriteUrl_ = function(pageUrl, linkUrl) {
 	  });
 	}
   }
-  return linkUrl;
+  return null;
 };
 
 if(linktweak.globals.IS_OPERA) {
