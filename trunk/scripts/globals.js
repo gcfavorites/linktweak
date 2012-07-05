@@ -122,12 +122,12 @@ linktweak.globals.generatePresetRules = function(presets) {
 linktweak.globals.loadSettings = function() {
   var settings = null;
   try {
-	settings = goog.json.parse(localStorage[linktweak.globals.SETTINGS_STORAGE_NAME]);
+	settings = JSON.parse(localStorage[linktweak.globals.SETTINGS_STORAGE_NAME]);
   }catch(e) {}
   if(!settings) {
 	try{
 	  settings = linktweak.globals.convertSettingsV0(
-		goog.json.parse(localStorage['rewriterules'] || ''));
+		JSON.parse(localStorage['rewriterules'] || ''));
 	}catch(e) {}
   }
 
