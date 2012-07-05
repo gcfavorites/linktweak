@@ -37,7 +37,7 @@ var COMPILED = false;
  *
  * @const
  */
-var goog = goog || {};
+var goog = goog || {}; // Identifies this file as the Closure base.
 
 
 /**
@@ -80,20 +80,13 @@ goog.LOCALE = 'en';  // default to en
 
 
 /**
- * Indicates whether or not we can call 'eval' directly to eval code in the
- * global scope. Set to a Boolean by the first call to goog.globalEval (which
- * empirically tests whether eval works for globals). @see goog.globalEval
- * @type {?boolean}
- * @private
- */
-goog.evalWorksForGlobals_ = null;
-
-
-/**
- * Creates object stubs for a namespace. When present in a file, goog.provide
- * also indicates that the file defines the indicated object. Calls to
- * goog.provide are resolved by the compiler if --closure_pass is set.
- * @param {string} name name of the object that this file defines.
+ * Creates object stubs for a namespace.  The presence of one or more
+ * goog.provide() calls indicate that the file defines the given
+ * objects/namespaces.  Build tools also scan for provide/require statements
+ * to discern dependencies, build dependency files (see deps.js), etc.
+ * @see goog.require
+ * @param {string} name Namespace provided by this file in the form
+ *     "goog.package.part".
  */
 goog.provide = function(name) {
   if (!COMPILED) {
@@ -102,12 +95,16 @@ goog.provide = function(name) {
     // declaration. And when JSCompiler transforms goog.provide into a real
     // variable declaration, the compiled JS should work the same as the raw
     // JS--even when the raw JS uses goog.provide incorrectly.
-    if (goog.getObjectByName(name) && !goog.implicitNamespaces_[name]) {
+    if (goog.isProvided_(name)) {
       throw Error('Namespace "' + name + '" already declared.');
     }
+    delete goog.implicitNamespaces_[name];
 
     var namespace = name;
     while ((namespace = namespace.substring(0, namespace.lastIndexOf('.')))) {
+      if (goog.getObjectByName(namespace)) {
+        break;
+      }
       goog.implicitNamespaces_[namespace] = true;
     }
   }
@@ -132,6 +129,18 @@ goog.setTestOnly = function(opt_message) {
 
 
 if (!COMPILED) {
+
+  /**
+   * Check if the given name has been goog.provided. This will return false for
+   * names that are available only as implicit namespaces.
+   * @param {string} name name of the object to look for.
+   * @return {boolean} Whether the name has been provided.
+   * @private
+   */
+  goog.isProvided_ = function(name) {
+    return !goog.implicitNamespaces_[name] && !!goog.getObjectByName(name);
+  };
+
   /**
    * Namespaces implicitly defined by goog.provide. For example,
    * goog.provide('goog.events.Event') implicitly declares
@@ -194,7 +203,7 @@ goog.exportPath_ = function(name, opt_object, opt_objectToExportTo) {
  * @param {string} name The fully qualified name.
  * @param {Object=} opt_obj The object within which to look; default is
  *     |goog.global|.
- * @return {Object} The object or, if not found, null.
+ * @return {?} The value (object or primitive) or, if not found, null.
  */
 goog.getObjectByName = function(name, opt_obj) {
   var parts = name.split('.');
@@ -256,37 +265,78 @@ goog.addDependency = function(relPath, provides, requires) {
 };
 
 
+
+
+// NOTE(nnaze): The debug DOM loader was included in base.js as an orignal
+// way to do "debug-mode" development.  The dependency system can sometimes
+// be confusing, as can the debug DOM loader's asyncronous nature.
+//
+// With the DOM loader, a call to goog.require() is not blocking -- the
+// script will not load until some point after the current script.  If a
+// namespace is needed at runtime, it needs to be defined in a previous
+// script, or loaded via require() with its registered dependencies.
+// User-defined namespaces may need their own deps file.  See http://go/js_deps,
+// http://go/genjsdeps, or, externally, DepsWriter.
+// http://code.google.com/closure/library/docs/depswriter.html
+//
+// Because of legacy clients, the DOM loader can't be easily removed from
+// base.js.  Work is being done to make it disableable or replaceable for
+// different environments (DOM-less JavaScript interpreters like Rhino or V8,
+// for example). See bootstrap/ for more information.
+
+
+/**
+ * @define {boolean} Whether to enable the debug loader.
+ *
+ * If enabled, a call to goog.require() will attempt to load the namespace by
+ * appending a script tag to the DOM (if the namespace has been registered).
+ *
+ * If disabled, goog.require() will simply assert that the namespace has been
+ * provided (and depend on the fact that some outside tool correctly ordered
+ * the script).
+ */
+goog.ENABLE_DEBUG_LOADER = true;
+
+
 /**
  * Implements a system for the dynamic resolution of dependencies
  * that works in parallel with the BUILD system. Note that all calls
  * to goog.require will be stripped by the JSCompiler when the
  * --closure_pass option is used.
- * @param {string} rule Rule to include, in the form goog.package.part.
+ * @see goog.provide
+ * @param {string} name Namespace to include (as was given in goog.provide())
+ *     in the form "goog.package.part".
  */
-goog.require = function(rule) {
+goog.require = function(name) {
 
   // if the object already exists we do not need do do anything
-  // TODO(user): If we start to support require based on file name this has
+  // TODO(arv): If we start to support require based on file name this has
   //            to change
-  // TODO(user): If we allow goog.foo.* this has to change
-  // TODO(user): If we implement dynamic load after page load we should probably
+  // TODO(arv): If we allow goog.foo.* this has to change
+  // TODO(arv): If we implement dynamic load after page load we should probably
   //            not remove this code for the compiled output
   if (!COMPILED) {
-    if (goog.getObjectByName(rule)) {
+    if (goog.isProvided_(name)) {
       return;
     }
-    var path = goog.getPathFromDeps_(rule);
-    if (path) {
-      goog.included_[path] = true;
-      goog.writeScripts_();
-    } else {
-      var errorMessage = 'goog.require could not find: ' + rule;
-      if (goog.global.console) {
-        goog.global.console['error'](errorMessage);
-      }
 
-        throw Error(errorMessage);
+    if (goog.ENABLE_DEBUG_LOADER) {
+      var path = goog.getPathFromDeps_(name);
+      if (path) {
+        goog.included_[path] = true;
+        goog.writeScripts_();
+        return;
+      }
     }
+
+    var errorMessage = 'goog.require could not find: ' + name;
+    if (goog.global.console) {
+      goog.global.console['error'](errorMessage);
+    }
+
+
+      throw Error(errorMessage);
+
   }
 };
 
@@ -335,12 +385,14 @@ goog.nullFunction = function() {};
 /**
  * The identity function. Returns its first argument.
  *
- * @param {...*} var_args The arguments of the function.
- * @return {*} The first argument.
+ * @param {*=} opt_returnValue The single value that will be returned.
+ * @param {...*} var_args Optional trailing arguments. These are ignored.
+ * @return {?} The first argument. We can't know the type -- just pass it along
+ *      without type.
  * @deprecated Use goog.functions.identity instead.
  */
-goog.identityFunction = function(var_args) {
-  return arguments[0];
+goog.identityFunction = function(opt_returnValue, var_args) {
+  return opt_returnValue;
 };
 
 
@@ -373,12 +425,29 @@ goog.abstractMethod = function() {
  */
 goog.addSingletonGetter = function(ctor) {
   ctor.getInstance = function() {
-    return ctor.instance_ || (ctor.instance_ = new ctor());
+    if (ctor.instance_) {
+      return ctor.instance_;
+    }
+    if (goog.DEBUG) {
+      // NOTE: JSCompiler can't optimize away Array#push.
+      goog.instantiatedSingletons_[goog.instantiatedSingletons_.length] = ctor;
+    }
+    return ctor.instance_ = new ctor;
   };
 };
 
 
-if (!COMPILED) {
+/**
+ * All singleton classes that have been instantiated, for testing. Don't read
+ * it directly, use the {@code goog.testing.singleton} module. The compiler
+ * removes this variable if unused.
+ * @type {!Array.<!Function>}
+ * @private
+ */
+goog.instantiatedSingletons_ = [];
+
+
+if (!COMPILED && goog.ENABLE_DEBUG_LOADER) {
   /**
    * Object used to keep track of urls that have already been added. This
    * record allows the prevention of circular dependencies.
@@ -509,13 +578,14 @@ if (!COMPILED) {
 
       if (path in deps.requires) {
         for (var requireName in deps.requires[path]) {
-          if (requireName in deps.nameToPath) {
-            visitNode(deps.nameToPath[requireName]);
-          } else if (!goog.getObjectByName(requireName)) {
-            // If the required name is defined, we assume that this
-            // dependency was bootstapped by other means. Otherwise,
-            // throw an exception.
-            throw Error('Undefined nameToPath for ' + requireName);
+          // If the required name is defined, we assume that it was already
+          // bootstrapped by other means.
+          if (!goog.isProvided_(requireName)) {
+            if (requireName in deps.nameToPath) {
+              visitNode(deps.nameToPath[requireName]);
+            } else {
+              throw Error('Undefined nameToPath for ' + requireName);
+            }
           }
         }
       }
@@ -674,52 +744,6 @@ goog.typeOf = function(value) {
 
 
 /**
- * Safe way to test whether a property is enumarable.  It allows testing
- * for enumerable on objects where 'propertyIsEnumerable' is overridden or
- * does not exist (like DOM nodes in IE). Does not use browser native
- * Object.propertyIsEnumerable.
- * @param {Object} object The object to test if the property is enumerable.
- * @param {string} propName The property name to check for.
- * @return {boolean} True if the property is enumarable.
- * @private
- */
-goog.propertyIsEnumerableCustom_ = function(object, propName) {
-  // KJS in Safari 2 is not ECMAScript compatible and lacks crucial methods
-  // such as propertyIsEnumerable.  We therefore use a workaround.
-  // Does anyone know a more efficient work around?
-  if (propName in object) {
-    for (var key in object) {
-      if (key == propName &&
-          Object.prototype.hasOwnProperty.call(object, propName)) {
-        return true;
-      }
-    }
-  }
-  return false;
-};
-
-
-/**
- * Safe way to test whether a property is enumarable.  It allows testing
- * for enumerable on objects where 'propertyIsEnumerable' is overridden or
- * does not exist (like DOM nodes in IE).
- * @param {Object} object The object to test if the property is enumerable.
- * @param {string} propName The property name to check for.
- * @return {boolean} True if the property is enumarable.
- * @private
- */
-goog.propertyIsEnumerable_ = function(object, propName) {
-  // In IE if object is from another window, cannot use propertyIsEnumerable
-  // from this window's Object. Will raise a 'JScript object expected' error.
-  if (object instanceof Object) {
-    return Object.prototype.propertyIsEnumerable.call(object, propName);
-  } else {
-    return goog.propertyIsEnumerableCustom_(object, propName);
-  }
-};
-
-
-/**
  * Returns true if the specified value is not |undefined|.
  * WARNING: Do not use this to test if an object has a property. Use the in
  * operator instead.  Additionally, this function assumes that the global
@@ -834,8 +858,10 @@ goog.isFunction = function(val) {
  * @return {boolean} Whether variable is an object.
  */
 goog.isObject = function(val) {
-  var type = goog.typeOf(val);
-  return type == 'object' || type == 'array' || type == 'function';
+  var type = typeof val;
+  return type == 'object' && val != null || type == 'function';
+  // return Object(val) === val also works, but is slower, especially if val is
+  // not an object.
 };
 
 
@@ -851,7 +877,7 @@ goog.isObject = function(val) {
  * @return {number} The unique ID for the object.
  */
 goog.getUid = function(obj) {
-  // TODO(user): Make the type stricter, do not accept null.
+  // TODO(arv): Make the type stricter, do not accept null.
 
   // In Opera window.hasOwnProperty exists but always returns false so we avoid
   // using it. As a consequence the unique ID generated for BaseClass.prototype
@@ -868,7 +894,7 @@ goog.getUid = function(obj) {
  * @param {Object} obj The object to remove the unique ID field from.
  */
 goog.removeUid = function(obj) {
-  // TODO(user): Make the type stricter, do not accept null.
+  // TODO(arv): Make the type stricter, do not accept null.
 
   // DOM nodes in IE are not instance of Object and throws exception
   // for delete. Instead we try to use removeAttribute
@@ -952,24 +978,10 @@ goog.cloneObject = function(obj) {
 
 
 /**
- * Forward declaration for the clone method. This is necessary until the
- * compiler can better support duck-typing constructs as used in
- * goog.cloneObject.
- *
- * TODO(user): Remove once the JSCompiler can infer that the check for
- * proto.clone is safe in goog.cloneObject.
- *
- * @type {Function}
- */
-Object.prototype.clone;
-
-
-/**
  * A native implementation of goog.bind.
  * @param {Function} fn A function to partially apply.
  * @param {Object|undefined} selfObj Specifies the object which |this| should
- *     point to when the function is run. If the value is null or undefined, it
- *     will default to the global object.
+ *     point to when the function is run.
  * @param {...*} var_args Additional arguments that are partially
  *     applied to the function.
  * @return {!Function} A partially-applied form of the function bind() was
@@ -988,8 +1000,7 @@ goog.bindNative_ = function(fn, selfObj, var_args) {
  * A pure-JS implementation of goog.bind.
  * @param {Function} fn A function to partially apply.
  * @param {Object|undefined} selfObj Specifies the object which |this| should
- *     point to when the function is run. If the value is null or undefined, it
- *     will default to the global object.
+ *     point to when the function is run.
  * @param {...*} var_args Additional arguments that are partially
  *     applied to the function.
  * @return {!Function} A partially-applied form of the function bind() was
@@ -997,7 +1008,9 @@ goog.bindNative_ = function(fn, selfObj, var_args) {
  * @private
  */
 goog.bindJs_ = function(fn, selfObj, var_args) {
-  var context = selfObj || goog.global;
+  if (!fn) {
+    throw new Error();
+  }
 
   if (arguments.length > 2) {
     var boundArgs = Array.prototype.slice.call(arguments, 2);
@@ -1005,12 +1018,12 @@ goog.bindJs_ = function(fn, selfObj, var_args) {
       // Prepend the bound arguments to the current arguments.
       var newArgs = Array.prototype.slice.call(arguments);
       Array.prototype.unshift.apply(newArgs, boundArgs);
-      return fn.apply(context, newArgs);
+      return fn.apply(selfObj, newArgs);
     };
 
   } else {
     return function() {
-      return fn.apply(context, arguments);
+      return fn.apply(selfObj, arguments);
     };
   }
 };
@@ -1032,8 +1045,7 @@ goog.bindJs_ = function(fn, selfObj, var_args) {
  *
  * @param {Function} fn A function to partially apply.
  * @param {Object|undefined} selfObj Specifies the object which |this| should
- *     point to when the function is run. If the value is null or undefined, it
- *     will default to the global object.
+ *     point to when the function is run.
  * @param {...*} var_args Additional arguments that are partially
  *     applied to the function.
  * @return {!Function} A partially-applied form of the function bind() was
@@ -1157,6 +1169,16 @@ goog.globalEval = function(script) {
 
 
 /**
+ * Indicates whether or not we can call 'eval' directly to eval code in the
+ * global scope. Set to a Boolean by the first call to goog.globalEval (which
+ * empirically tests whether eval works for globals). @see goog.globalEval
+ * @type {?boolean}
+ * @private
+ */
+goog.evalWorksForGlobals_ = null;
+
+
+/**
  * Optional map of CSS class names to obfuscated names used with
  * goog.getCssName().
  * @type {Object|undefined}
@@ -1260,14 +1282,36 @@ goog.getCssName = function(className, opt_modifier) {
  * @param {!Object} mapping A map of strings to strings where keys are possible
  *     arguments to goog.getCssName() and values are the corresponding values
  *     that should be returned.
- * @param {string=} style The style of css name mapping. There are two valid
+ * @param {string=} opt_style The style of css name mapping. There are two valid
  *     options: 'BY_PART', and 'BY_WHOLE'.
  * @see goog.getCssName for a description.
  */
-goog.setCssNameMapping = function(mapping, style) {
+goog.setCssNameMapping = function(mapping, opt_style) {
   goog.cssNameMapping_ = mapping;
-  goog.cssNameMappingStyle_ = style;
+  goog.cssNameMappingStyle_ = opt_style;
 };
+
+
+/**
+ * To use CSS renaming in compiled mode, one of the input files should have a
+ * call to goog.setCssNameMapping() with an object literal that the JSCompiler
+ * can extract and use to replace all calls to goog.getCssName(). In uncompiled
+ * mode, JavaScript code should be loaded before this base.js file that declares
+ * a global variable, CLOSURE_CSS_NAME_MAPPING, which is used below. This is
+ * to ensure that the mapping is loaded before any calls to goog.getCssName()
+ * are made in uncompiled mode.
+ *
+ * A hook for overriding the CSS name mapping.
+ * @type {Object|undefined}
+ */
+goog.global.CLOSURE_CSS_NAME_MAPPING;
+
+
+if (!COMPILED && goog.global.CLOSURE_CSS_NAME_MAPPING) {
+  // This does not call goog.setCssNameMapping() because the JSCompiler
+  // requires that goog.setCssNameMapping() be called with an object literal.
+  goog.cssNameMapping_ = goog.global.CLOSURE_CSS_NAME_MAPPING;
+}
 
 
 /**
@@ -1295,7 +1339,7 @@ goog.getMsg = function(str, opt_values) {
  * <p>Also handy for making public items that are defined in anonymous
  * closures.
  *
- * ex. goog.exportSymbol('Foo', Foo);
+ * ex. goog.exportSymbol('public.path.Foo', Foo);
  *
  * ex. goog.exportSymbol('public.path.Foo.staticFunction',
  *                       Foo.staticFunction);
@@ -1337,9 +1381,8 @@ goog.exportProperty = function(object, publicName, symbol) {
  * ParentClass.prototype.foo = function(a) { }
  *
  * function ChildClass(a, b, c) {
- *   ParentClass.call(this, a, b);
+ *   goog.base(this, a, b);
  * }
- *
  * goog.inherits(ChildClass, ParentClass);
  *
  * var child = new ChildClass('a', 'b', 'see');
@@ -1365,6 +1408,7 @@ goog.inherits = function(childCtor, parentCtor) {
   tempCtor.prototype = parentCtor.prototype;
   childCtor.superClass_ = parentCtor.prototype;
   childCtor.prototype = new tempCtor();
+  /** @override */
   childCtor.prototype.constructor = childCtor;
 };
 
@@ -1441,53 +1485,6 @@ goog.scope = function(fn) {
 };
 
 
-// Copyright 2009 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/**
- * @fileoverview Provides a base class for custom Error objects such that the
- * stack is correctly maintained.
- *
- * You should never need to throw goog.debug.Error(msg) directly, Error(msg) is
- * sufficient.
- *
- */
-
-goog.provide('goog.debug.Error');
-
-
-
-/**
- * Base class for custom error objects.
- * @param {*=} opt_msg The message associated with the error.
- * @constructor
- * @extends {Error}
- */
-goog.debug.Error = function(opt_msg) {
-
-  // Ensure there is a stack trace.
-  this.stack = new Error().stack || '';
-
-  if (opt_msg) {
-    this.message = String(opt_msg);
-  }
-};
-goog.inherits(goog.debug.Error, Error);
-
-
-/** @inheritDoc */
-goog.debug.Error.prototype.name = 'CustomError';
 // Copyright 2006 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -1742,6 +1739,19 @@ goog.string.normalizeSpaces = function(str) {
 
 
 /**
+ * Removes the breaking spaces from the left and right of the string and
+ * collapses the sequences of breaking spaces in the middle into single spaces.
+ * The original and the result strings render the same way in HTML.
+ * @param {string} str A string in which to collapse spaces.
+ * @return {string} Copy of the string with normalized breaking spaces.
+ */
+goog.string.collapseBreakingSpaces = function(str) {
+  return str.replace(/[\t\r\n ]+/g, ' ').replace(
+      /^[\t\r\n ]+|[\t\r\n ]+$/g, '');
+};
+
+
+/**
  * Trims white spaces to the left and right of a string.
  * @param {string} str The string to trim.
  * @return {string} A trimmed copy of {@code str}.
@@ -1880,14 +1890,6 @@ goog.string.numerateCompare = function(str1, str2) {
 
 
 /**
- * Regular expression used for determining if a string needs to be encoded.
- * @type {RegExp}
- * @private
- */
-goog.string.encodeUriRegExp_ = /^[a-zA-Z0-9\-_.!~*'()]*$/;
-
-
-/**
  * URL-encodes a string
  * @param {*} str The string to url-encode.
  * @return {string} An encoded copy of {@code str} that is safe for urls.
@@ -1895,15 +1897,7 @@ goog.string.encodeUriRegExp_ = /^[a-zA-Z0-9\-_.!~*'()]*$/;
  *     of URLs *will* be encoded.
  */
 goog.string.urlEncode = function(str) {
-  str = String(str);
-  // Checking if the search matches before calling encodeURIComponent avoids an
-  // extra allocation in IE6. This adds about 10us time in FF and a similiar
-  // over head in IE6 for lower working set apps, but for large working set
-  // apps like Gmail, it saves about 70us per call.
-  if (!goog.string.encodeUriRegExp_.test(str)) {
-    return encodeURIComponent(str);
-  }
-  return str;
+  return encodeURIComponent(String(str));
 };
 
 
@@ -2051,9 +2045,7 @@ goog.string.unescapeEntities = function(str) {
     // We are careful not to use a DOM if we do not have one. We use the []
     // notation so that the JSCompiler will not complain about these objects and
     // fields in the case where we have no DOM.
-    // If the string contains < then there could be a script tag in there and in
-    // that case we fall back to a non DOM solution as well.
-    if ('document' in goog.global && !goog.string.contains(str, '<')) {
+    if ('document' in goog.global) {
       return goog.string.unescapeEntitiesUsingDom_(str);
     } else {
       // Fall back on pure XML entities
@@ -2065,32 +2057,45 @@ goog.string.unescapeEntities = function(str) {
 
 
 /**
- * Unescapes an HTML string using a DOM. Don't use this function directly, it
- * should only be used by unescapeEntities. If used directly you will be
- * vulnerable to XSS attacks.
+ * Unescapes an HTML string using a DOM to resolve non-XML, non-numeric
+ * entities. This function is XSS-safe and whitespace-preserving.
  * @private
  * @param {string} str The string to unescape.
  * @return {string} The unescaped {@code str} string.
  */
 goog.string.unescapeEntitiesUsingDom_ = function(str) {
-  // Use a DIV as FF3 generates bogus markup for A > PRE.
-  var el = goog.global['document']['createElement']('div');
-  // Wrap in PRE to preserve whitespace in IE.
-  // The PRE must be part of the innerHTML markup,
-  // just setting innerHTML on a PRE element does not work.
-  // Also include a leading character since conforming HTML5
-  // UAs will strip leading newlines inside a PRE element.
-  el['innerHTML'] = '<pre>x' + str + '</pre>';
-  // Accesing the function directly triggers some virus scanners.
-  if (el['firstChild'][goog.string.NORMALIZE_FN_]) {
-    el['firstChild'][goog.string.NORMALIZE_FN_]();
-  }
-  // Remove the leading character we added.
-  str = el['firstChild']['firstChild']['nodeValue'].slice(1);
-  el['innerHTML'] = '';
-  // IE will also return non-standard newlines for TextNode.nodeValue,
-  // switching \r and \n, so canonicalize them before returning.
-  return goog.string.canonicalizeNewlines(str);
+  var seen = {'&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"'};
+  var div = document.createElement('div');
+  // Match as many valid entity characters as possible. If the actual entity
+  // happens to be shorter, it will still work as innerHTML will return the
+  // trailing characters unchanged. Since the entity characters do not include
+  // open angle bracket, there is no chance of XSS from the innerHTML use.
+  // Since no whitespace is passed to innerHTML, whitespace is preserved.
+  return str.replace(goog.string.HTML_ENTITY_PATTERN_, function(s, entity) {
+    // Check for cached entity.
+    var value = seen[s];
+    if (value) {
+      return value;
+    }
+    // Check for numeric entity.
+    if (entity.charAt(0) == '#') {
+      // Prefix with 0 so that hex entities (e.g. &#x10) parse as hex numbers.
+      var n = Number('0' + entity.substr(1));
+      if (!isNaN(n)) {
+        value = String.fromCharCode(n);
+      }
+    }
+    // Fall back to innerHTML otherwise.
+    if (!value) {
+      // Append a non-entity character to avoid a bug in Webkit that parses
+      // an invalid entity at the end of innerHTML text as the empty string.
+      div.innerHTML = s + ' ';
+      // Then remove the trailing character from the result.
+      value = div.firstChild.nodeValue.slice(0, -1);
+    }
+    // Cache and return.
+    return seen[s] = value;
+  });
 };
 
 
@@ -2113,6 +2118,7 @@ goog.string.unescapePureXmlEntities_ = function(str) {
         return '"';
       default:
         if (entity.charAt(0) == '#') {
+          // Prefix with 0 so that hex entities (e.g. &#x10) parse as hex.
           var n = Number('0' + entity.substr(1));
           if (!isNaN(n)) {
             return String.fromCharCode(n);
@@ -2126,12 +2132,12 @@ goog.string.unescapePureXmlEntities_ = function(str) {
 
 
 /**
- * String name for the node.normalize function. Anti-virus programs use this as
- * a signature for some viruses so we need a work around (temporary).
+ * Regular expression that matches an HTML entity.
+ * See also HTML5: Tokenization / Tokenizing character references.
  * @private
- * @type {string}
+ * @type {!RegExp}
  */
-goog.string.NORMALIZE_FN_ = 'normalize';
+goog.string.HTML_ENTITY_PATTERN_ = /&([^;\s<&]+);?/g;
 
 
 /**
@@ -2218,7 +2224,7 @@ goog.string.truncateMiddle = function(str, chars,
     str = goog.string.unescapeEntities(str);
   }
 
-  if (opt_trailingChars) {
+  if (opt_trailingChars && str.length > chars) {
     if (opt_trailingChars > chars) {
       opt_trailingChars = chars;
     }
@@ -2353,7 +2359,7 @@ goog.string.escapeChar = function(c) {
  * @param {string} s The string to build the map from.
  * @return {Object} The map of characters used.
  */
-// TODO(user): It seems like we should have a generic goog.array.toMap. But do
+// TODO(arv): It seems like we should have a generic goog.array.toMap. But do
 //            we want a dependency on goog.array in goog.string?
 goog.string.toMap = function(s) {
   var rv = {};
@@ -2365,13 +2371,25 @@ goog.string.toMap = function(s) {
 
 
 /**
- * Checks whether a string contains a given character.
+ * Checks whether a string contains a given substring.
  * @param {string} s The string to test.
  * @param {string} ss The substring to test for.
  * @return {boolean} True if {@code s} contains {@code ss}.
  */
 goog.string.contains = function(s, ss) {
   return s.indexOf(ss) != -1;
+};
+
+
+/**
+ * Returns the non-overlapping occurrences of ss in s.
+ * If either s or ss evalutes to false, then returns zero.
+ * @param {string} s The string to look in.
+ * @param {string} ss The string to look for.
+ * @return {number} Number of occurrences of ss in s.
+ */
+goog.string.countOf = function(s, ss) {
+  return s && ss ? s.split(ss).length - 1 : 0;
 };
 
 
@@ -2662,14 +2680,6 @@ goog.string.toNumber = function(str) {
 
 
 /**
- * A memoized cache for goog.string.toCamelCase.
- * @type {Object.<string>}
- * @private
- */
-goog.string.toCamelCaseCache_ = {};
-
-
-/**
  * Converts a string from selector-case to camelCase (e.g. from
  * "multi-part-string" to "multiPartString"), useful for converting
  * CSS selectors and HTML dataset keys to their equivalent JS properties.
@@ -2677,20 +2687,10 @@ goog.string.toCamelCaseCache_ = {};
  * @return {string} The string in camelCase form.
  */
 goog.string.toCamelCase = function(str) {
-  return goog.string.toCamelCaseCache_[str] ||
-      (goog.string.toCamelCaseCache_[str] =
-          String(str).replace(/\-([a-z])/g, function(all, match) {
-            return match.toUpperCase();
-          }));
+  return String(str).replace(/\-([a-z])/g, function(all, match) {
+    return match.toUpperCase();
+  });
 };
-
-
-/**
- * A memoized cache for goog.string.toSelectorCase.
- * @type {Object.<string>}
- * @private
- */
-goog.string.toSelectorCaseCache_ = {};
 
 
 /**
@@ -2701,10 +2701,637 @@ goog.string.toSelectorCaseCache_ = {};
  * @return {string} The string in selector-case form.
  */
 goog.string.toSelectorCase = function(str) {
-  return goog.string.toSelectorCaseCache_[str] ||
-      (goog.string.toSelectorCaseCache_[str] =
-          String(str).replace(/([A-Z])/g, '-$1').toLowerCase());
+  return String(str).replace(/([A-Z])/g, '-$1').toLowerCase();
 };
+
+
+/**
+ * Converts a string into TitleCase. First character of the string is always
+ * capitalized in addition to the first letter of every subsequent word.
+ * Words are delimited by one or more whitespaces by default. Custom delimiters
+ * can optionally be specified to replace the default, which doesn't preserve
+ * whitespace delimiters and instead must be explicitly included if needed.
+ *
+ * Default delimiter => " ":
+ *    goog.string.toTitleCase('oneTwoThree')    => 'OneTwoThree'
+ *    goog.string.toTitleCase('one two three')  => 'One Two Three'
+ *    goog.string.toTitleCase('  one   two   ') => '  One   Two   '
+ *    goog.string.toTitleCase('one_two_three')  => 'One_two_three'
+ *    goog.string.toTitleCase('one-two-three')  => 'One-two-three'
+ *
+ * Custom delimiter => "_-.":
+ *    goog.string.toTitleCase('oneTwoThree', '_-.')       => 'OneTwoThree'
+ *    goog.string.toTitleCase('one two three', '_-.')     => 'One two three'
+ *    goog.string.toTitleCase('  one   two   ', '_-.')    => '  one   two   '
+ *    goog.string.toTitleCase('one_two_three', '_-.')     => 'One_Two_Three'
+ *    goog.string.toTitleCase('one-two-three', '_-.')     => 'One-Two-Three'
+ *    goog.string.toTitleCase('one...two...three', '_-.') => 'One...Two...Three'
+ *    goog.string.toTitleCase('one. two. three', '_-.')   => 'One. two. three'
+ *    goog.string.toTitleCase('one-two.three', '_-.')     => 'One-Two.Three'
+ *
+ * @param {string} str String value in camelCase form.
+ * @param {string=} opt_delimiters Custom delimiter character set used to
+ *      distinguish words in the string value. Each character represents a
+ *      single delimiter. When provided, default whitespace delimiter is
+ *      overridden and must be explicitly included if needed.
+ * @return {string} String value in TitleCase form.
+ */
+goog.string.toTitleCase = function(str, opt_delimiters) {
+  var delimiters = goog.isString(opt_delimiters) ?
+      goog.string.regExpEscape(opt_delimiters) : '\\s';
+
+  // For IE8, we need to prevent using an empty character set. Otherwise,
+  // incorrect matching will occur.
+  delimiters = delimiters ? '|[' + delimiters + ']+' : '';
+
+  var regexp = new RegExp('(^' + delimiters + ')([a-z])', 'g');
+  return str.replace(regexp, function(all, p1, p2) {
+    return p1 + p2.toUpperCase();
+  });
+};
+
+
+/**
+ * Parse a string in decimal or hexidecimal ('0xFFFF') form.
+ *
+ * To parse a particular radix, please use parseInt(string, radix) directly. See
+ * https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/parseInt
+ *
+ * This is a wrapper for the built-in parseInt function that will only parse
+ * numbers as base 10 or base 16.  Some JS implementations assume strings
+ * starting with "0" are intended to be octal. ES3 allowed but discouraged
+ * this behavior. ES5 forbids it.  This function emulates the ES5 behavior.
+ *
+ * For more information, see Mozilla JS Reference: http://goo.gl/8RiFj
+ *
+ * @param {string|number|null|undefined} value The value to be parsed.
+ * @return {number} The number, parsed. If the string failed to parse, this
+ *     will be NaN.
+ */
+goog.string.parseInt = function(value) {
+  // Force finite numbers to strings.
+  if (isFinite(value)) {
+    value = String(value);
+  }
+
+  if (goog.isString(value)) {
+    // If the string starts with '0x' or '-0x', parse as hex.
+    return /^\s*-?0x/i.test(value) ?
+        parseInt(value, 16) : parseInt(value, 10);
+  }
+
+  return NaN;
+};
+// Copyright 2006 The Closure Library Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS-IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Rendering engine detection.
+ * @see <a href="http://www.useragentstring.com/">User agent strings</a>
+ * For information on the browser brand (such as Safari versus Chrome), see
+ * goog.userAgent.product.
+ * @see ../demos/useragent.html
+ */
+
+goog.provide('goog.userAgent');
+
+goog.require('goog.string');
+
+
+/**
+ * @define {boolean} Whether we know at compile-time that the browser is IE.
+ */
+goog.userAgent.ASSUME_IE = false;
+
+
+/**
+ * @define {boolean} Whether we know at compile-time that the browser is GECKO.
+ */
+goog.userAgent.ASSUME_GECKO = false;
+
+
+/**
+ * @define {boolean} Whether we know at compile-time that the browser is WEBKIT.
+ */
+goog.userAgent.ASSUME_WEBKIT = false;
+
+
+/**
+ * @define {boolean} Whether we know at compile-time that the browser is a
+ *     mobile device running WebKit e.g. iPhone or Android.
+ */
+goog.userAgent.ASSUME_MOBILE_WEBKIT = false;
+
+
+/**
+ * @define {boolean} Whether we know at compile-time that the browser is OPERA.
+ */
+goog.userAgent.ASSUME_OPERA = false;
+
+
+/**
+ * @define {boolean} Whether the {@code goog.userAgent.isVersion} function will
+ *     return true for any version.
+ */
+goog.userAgent.ASSUME_ANY_VERSION = false;
+
+
+/**
+ * Whether we know the browser engine at compile-time.
+ * @type {boolean}
+ * @private
+ */
+goog.userAgent.BROWSER_KNOWN_ =
+    goog.userAgent.ASSUME_IE ||
+    goog.userAgent.ASSUME_GECKO ||
+    goog.userAgent.ASSUME_MOBILE_WEBKIT ||
+    goog.userAgent.ASSUME_WEBKIT ||
+    goog.userAgent.ASSUME_OPERA;
+
+
+/**
+ * Returns the userAgent string for the current browser.
+ * Some user agents (I'm thinking of you, Gears WorkerPool) do not expose a
+ * navigator object off the global scope.  In that case we return null.
+ *
+ * @return {?string} The userAgent string or null if there is none.
+ */
+goog.userAgent.getUserAgentString = function() {
+  return goog.global['navigator'] ? goog.global['navigator'].userAgent : null;
+};
+
+
+/**
+ * @return {Object} The native navigator object.
+ */
+goog.userAgent.getNavigator = function() {
+  // Need a local navigator reference instead of using the global one,
+  // to avoid the rare case where they reference different objects.
+  // (in a WorkerPool, for example).
+  return goog.global['navigator'];
+};
+
+
+/**
+ * Initializer for goog.userAgent.
+ *
+ * This is a named function so that it can be stripped via the jscompiler
+ * option for stripping types.
+ * @private
+ */
+goog.userAgent.init_ = function() {
+  /**
+   * Whether the user agent string denotes Opera.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedOpera_ = false;
+
+  /**
+   * Whether the user agent string denotes Internet Explorer. This includes
+   * other browsers using Trident as its rendering engine. For example AOL
+   * and Netscape 8
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedIe_ = false;
+
+  /**
+   * Whether the user agent string denotes WebKit. WebKit is the rendering
+   * engine that Safari, Android and others use.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedWebkit_ = false;
+
+  /**
+   * Whether the user agent string denotes a mobile device.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedMobile_ = false;
+
+  /**
+   * Whether the user agent string denotes Gecko. Gecko is the rendering
+   * engine used by Mozilla, Mozilla Firefox, Camino and many more.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedGecko_ = false;
+
+  var ua;
+  if (!goog.userAgent.BROWSER_KNOWN_ &&
+      (ua = goog.userAgent.getUserAgentString())) {
+    var navigator = goog.userAgent.getNavigator();
+    goog.userAgent.detectedOpera_ = ua.indexOf('Opera') == 0;
+    goog.userAgent.detectedIe_ = !goog.userAgent.detectedOpera_ &&
+        ua.indexOf('MSIE') != -1;
+    goog.userAgent.detectedWebkit_ = !goog.userAgent.detectedOpera_ &&
+        ua.indexOf('WebKit') != -1;
+    // WebKit also gives navigator.product string equal to 'Gecko'.
+    goog.userAgent.detectedMobile_ = goog.userAgent.detectedWebkit_ &&
+        ua.indexOf('Mobile') != -1;
+    goog.userAgent.detectedGecko_ = !goog.userAgent.detectedOpera_ &&
+        !goog.userAgent.detectedWebkit_ && navigator.product == 'Gecko';
+  }
+};
+
+
+if (!goog.userAgent.BROWSER_KNOWN_) {
+  goog.userAgent.init_();
+}
+
+
+/**
+ * Whether the user agent is Opera.
+ * @type {boolean}
+ */
+goog.userAgent.OPERA = goog.userAgent.BROWSER_KNOWN_ ?
+    goog.userAgent.ASSUME_OPERA : goog.userAgent.detectedOpera_;
+
+
+/**
+ * Whether the user agent is Internet Explorer. This includes other browsers
+ * using Trident as its rendering engine. For example AOL and Netscape 8
+ * @type {boolean}
+ */
+goog.userAgent.IE = goog.userAgent.BROWSER_KNOWN_ ?
+    goog.userAgent.ASSUME_IE : goog.userAgent.detectedIe_;
+
+
+/**
+ * Whether the user agent is Gecko. Gecko is the rendering engine used by
+ * Mozilla, Mozilla Firefox, Camino and many more.
+ * @type {boolean}
+ */
+goog.userAgent.GECKO = goog.userAgent.BROWSER_KNOWN_ ?
+    goog.userAgent.ASSUME_GECKO :
+    goog.userAgent.detectedGecko_;
+
+
+/**
+ * Whether the user agent is WebKit. WebKit is the rendering engine that
+ * Safari, Android and others use.
+ * @type {boolean}
+ */
+goog.userAgent.WEBKIT = goog.userAgent.BROWSER_KNOWN_ ?
+    goog.userAgent.ASSUME_WEBKIT || goog.userAgent.ASSUME_MOBILE_WEBKIT :
+    goog.userAgent.detectedWebkit_;
+
+
+/**
+ * Whether the user agent is running on a mobile device.
+ * @type {boolean}
+ */
+goog.userAgent.MOBILE = goog.userAgent.ASSUME_MOBILE_WEBKIT ||
+                        goog.userAgent.detectedMobile_;
+
+
+/**
+ * Used while transitioning code to use WEBKIT instead.
+ * @type {boolean}
+ * @deprecated Use {@link goog.userAgent.product.SAFARI} instead.
+ * TODO(nicksantos): Delete this from goog.userAgent.
+ */
+goog.userAgent.SAFARI = goog.userAgent.WEBKIT;
+
+
+/**
+ * @return {string} the platform (operating system) the user agent is running
+ *     on. Default to empty string because navigator.platform may not be defined
+ *     (on Rhino, for example).
+ * @private
+ */
+goog.userAgent.determinePlatform_ = function() {
+  var navigator = goog.userAgent.getNavigator();
+  return navigator && navigator.platform || '';
+};
+
+
+/**
+ * The platform (operating system) the user agent is running on. Default to
+ * empty string because navigator.platform may not be defined (on Rhino, for
+ * example).
+ * @type {string}
+ */
+goog.userAgent.PLATFORM = goog.userAgent.determinePlatform_();
+
+
+/**
+ * @define {boolean} Whether the user agent is running on a Macintosh operating
+ *     system.
+ */
+goog.userAgent.ASSUME_MAC = false;
+
+
+/**
+ * @define {boolean} Whether the user agent is running on a Windows operating
+ *     system.
+ */
+goog.userAgent.ASSUME_WINDOWS = false;
+
+
+/**
+ * @define {boolean} Whether the user agent is running on a Linux operating
+ *     system.
+ */
+goog.userAgent.ASSUME_LINUX = false;
+
+
+/**
+ * @define {boolean} Whether the user agent is running on a X11 windowing
+ *     system.
+ */
+goog.userAgent.ASSUME_X11 = false;
+
+
+/**
+ * @type {boolean}
+ * @private
+ */
+goog.userAgent.PLATFORM_KNOWN_ =
+    goog.userAgent.ASSUME_MAC ||
+    goog.userAgent.ASSUME_WINDOWS ||
+    goog.userAgent.ASSUME_LINUX ||
+    goog.userAgent.ASSUME_X11;
+
+
+/**
+ * Initialize the goog.userAgent constants that define which platform the user
+ * agent is running on.
+ * @private
+ */
+goog.userAgent.initPlatform_ = function() {
+  /**
+   * Whether the user agent is running on a Macintosh operating system.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedMac_ = goog.string.contains(goog.userAgent.PLATFORM,
+      'Mac');
+
+  /**
+   * Whether the user agent is running on a Windows operating system.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedWindows_ = goog.string.contains(
+      goog.userAgent.PLATFORM, 'Win');
+
+  /**
+   * Whether the user agent is running on a Linux operating system.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedLinux_ = goog.string.contains(goog.userAgent.PLATFORM,
+      'Linux');
+
+  /**
+   * Whether the user agent is running on a X11 windowing system.
+   * @type {boolean}
+   * @private
+   */
+  goog.userAgent.detectedX11_ = !!goog.userAgent.getNavigator() &&
+      goog.string.contains(goog.userAgent.getNavigator()['appVersion'] || '',
+          'X11');
+};
+
+
+if (!goog.userAgent.PLATFORM_KNOWN_) {
+  goog.userAgent.initPlatform_();
+}
+
+
+/**
+ * Whether the user agent is running on a Macintosh operating system.
+ * @type {boolean}
+ */
+goog.userAgent.MAC = goog.userAgent.PLATFORM_KNOWN_ ?
+    goog.userAgent.ASSUME_MAC : goog.userAgent.detectedMac_;
+
+
+/**
+ * Whether the user agent is running on a Windows operating system.
+ * @type {boolean}
+ */
+goog.userAgent.WINDOWS = goog.userAgent.PLATFORM_KNOWN_ ?
+    goog.userAgent.ASSUME_WINDOWS : goog.userAgent.detectedWindows_;
+
+
+/**
+ * Whether the user agent is running on a Linux operating system.
+ * @type {boolean}
+ */
+goog.userAgent.LINUX = goog.userAgent.PLATFORM_KNOWN_ ?
+    goog.userAgent.ASSUME_LINUX : goog.userAgent.detectedLinux_;
+
+
+/**
+ * Whether the user agent is running on a X11 windowing system.
+ * @type {boolean}
+ */
+goog.userAgent.X11 = goog.userAgent.PLATFORM_KNOWN_ ?
+    goog.userAgent.ASSUME_X11 : goog.userAgent.detectedX11_;
+
+
+/**
+ * @return {string} The string that describes the version number of the user
+ *     agent.
+ * @private
+ */
+goog.userAgent.determineVersion_ = function() {
+  // All browsers have different ways to detect the version and they all have
+  // different naming schemes.
+
+  // version is a string rather than a number because it may contain 'b', 'a',
+  // and so on.
+  var version = '', re;
+
+  if (goog.userAgent.OPERA && goog.global['opera']) {
+    var operaVersion = goog.global['opera'].version;
+    version = typeof operaVersion == 'function' ? operaVersion() : operaVersion;
+  } else {
+    if (goog.userAgent.GECKO) {
+      re = /rv\:([^\);]+)(\)|;)/;
+    } else if (goog.userAgent.IE) {
+      re = /MSIE\s+([^\);]+)(\)|;)/;
+    } else if (goog.userAgent.WEBKIT) {
+      // WebKit/125.4
+      re = /WebKit\/(\S+)/;
+    }
+    if (re) {
+      var arr = re.exec(goog.userAgent.getUserAgentString());
+      version = arr ? arr[1] : '';
+    }
+  }
+  if (goog.userAgent.IE) {
+    // IE9 can be in document mode 9 but be reporting an inconsistent user agent
+    // version.  If it is identifying as a version lower than 9 we take the
+    // documentMode as the version instead.  IE8 has similar behavior.
+    // It is recommended to set the X-UA-Compatible header to ensure that IE9
+    // uses documentMode 9.
+    var docMode = goog.userAgent.getDocumentMode_();
+    if (docMode > parseFloat(version)) {
+      return String(docMode);
+    }
+  }
+  return version;
+};
+
+
+/**
+ * @return {number|undefined} Returns the document mode (for testing).
+ * @private
+ */
+goog.userAgent.getDocumentMode_ = function() {
+  // NOTE(user): goog.userAgent may be used in context where there is no DOM.
+  var doc = goog.global['document'];
+  return doc ? doc['documentMode'] : undefined;
+};
+
+
+/**
+ * The version of the user agent. This is a string because it might contain
+ * 'b' (as in beta) as well as multiple dots.
+ * @type {string}
+ */
+goog.userAgent.VERSION = goog.userAgent.determineVersion_();
+
+
+/**
+ * Compares two version numbers.
+ *
+ * @param {string} v1 Version of first item.
+ * @param {string} v2 Version of second item.
+ *
+ * @return {number}  1 if first argument is higher
+ *                   0 if arguments are equal
+ *                  -1 if second argument is higher.
+ * @deprecated Use goog.string.compareVersions.
+ */
+goog.userAgent.compare = function(v1, v2) {
+  return goog.string.compareVersions(v1, v2);
+};
+
+
+/**
+ * Cache for {@link goog.userAgent.isVersion}. Calls to compareVersions are
+ * surprisingly expensive and as a browsers version number is unlikely to change
+ * during a session we cache the results.
+ * @type {Object}
+ * @private
+ */
+goog.userAgent.isVersionCache_ = {};
+
+
+/**
+ * Whether the user agent version is higher or the same as the given version.
+ * NOTE: When checking the version numbers for Firefox and Safari, be sure to
+ * use the engine's version, not the browser's version number.  For example,
+ * Firefox 3.0 corresponds to Gecko 1.9 and Safari 3.0 to Webkit 522.11.
+ * Opera and Internet Explorer versions match the product release number.<br>
+ * @see <a href="http://en.wikipedia.org/wiki/Safari_version_history">
+ *     Webkit</a>
+ * @see <a href="http://en.wikipedia.org/wiki/Gecko_engine">Gecko</a>
+ *
+ * @param {string|number} version The version to check.
+ * @return {boolean} Whether the user agent version is higher or the same as
+ *     the given version.
+ */
+goog.userAgent.isVersion = function(version) {
+  return goog.userAgent.ASSUME_ANY_VERSION ||
+      goog.userAgent.isVersionCache_[version] ||
+      (goog.userAgent.isVersionCache_[version] =
+          goog.string.compareVersions(goog.userAgent.VERSION, version) >= 0);
+};
+
+
+/**
+ * Cache for {@link goog.userAgent.isDocumentMode}.
+ * Browsers document mode version number is unlikely to change during a session
+ * we cache the results.
+ * @type {Object}
+ * @private
+ */
+goog.userAgent.isDocumentModeCache_ = {};
+
+
+/**
+ * Whether the IE effective document mode is higher or the same as the given
+ * document mode version.
+ * NOTE: Only for IE, return false for another browser.
+ *
+ * @param {number} documentMode The document mode version to check.
+ * @return {boolean} Whether the IE effective document mode is higher or the
+ *     same as the given version.
+ */
+goog.userAgent.isDocumentMode = function(documentMode) {
+  return goog.userAgent.isDocumentModeCache_[documentMode] ||
+      (goog.userAgent.isDocumentModeCache_[documentMode] = goog.userAgent.IE &&
+      !!document.documentMode && document.documentMode >= documentMode);
+};
+// Copyright 2009 The Closure Library Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS-IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * @fileoverview Provides a base class for custom Error objects such that the
+ * stack is correctly maintained.
+ *
+ * You should never need to throw goog.debug.Error(msg) directly, Error(msg) is
+ * sufficient.
+ *
+ */
+
+goog.provide('goog.debug.Error');
+
+
+
+/**
+ * Base class for custom error objects.
+ * @param {*=} opt_msg The message associated with the error.
+ * @constructor
+ * @extends {Error}
+ */
+goog.debug.Error = function(opt_msg) {
+
+  // Ensure there is a stack trace.
+  if (Error.captureStackTrace) {
+    Error.captureStackTrace(this, goog.debug.Error);
+  } else {
+    this.stack = new Error().stack || '';
+  }
+
+  if (opt_msg) {
+    this.message = String(opt_msg);
+  }
+};
+goog.inherits(goog.debug.Error, Error);
+
+
+/** @override */
+goog.debug.Error.prototype.name = 'CustomError';
 // Copyright 2008 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -2778,7 +3405,7 @@ goog.asserts.AssertionError = function(messagePattern, messageArgs) {
 goog.inherits(goog.asserts.AssertionError, goog.debug.Error);
 
 
-/** @inheritDoc */
+/** @override */
 goog.asserts.AssertionError.prototype.name = 'AssertionError';
 
 
@@ -2968,18 +3595,23 @@ goog.asserts.assertBoolean = function(value, opt_message, var_args) {
 /**
  * Checks if the value is an instance of the user-defined type if
  * goog.asserts.ENABLE_ASSERTS is true.
+ *
+ * The compiler may tighten the type returned by this function.
+ *
  * @param {*} value The value to check.
  * @param {!Function} type A user-defined constructor.
  * @param {string=} opt_message Error message in case of failure.
  * @param {...*} var_args The items to substitute into the failure message.
  * @throws {goog.asserts.AssertionError} When the value is not an instance of
  *     type.
+ * @return {!Object}
  */
 goog.asserts.assertInstanceof = function(value, type, opt_message, var_args) {
   if (goog.asserts.ENABLE_ASSERTS && !(value instanceof type)) {
     goog.asserts.doAssertFailure_('instanceof check failed.', null,
         opt_message, Array.prototype.slice.call(arguments, 3));
   }
+  return /** @type {!Object} */(value);
 };
 
 // Copyright 2008 The Closure Library Authors. All Rights Reserved.
@@ -3025,13 +3657,19 @@ goog.asserts.assertInstanceof = function(value, type, opt_message, var_args) {
  * Uses features of RFC 3986 for parsing/formatting URIs:
  *   http://gbiv.com/protocols/uri/rfc/rfc3986.html
  *
+ * @author gboyer@google.com (Garrett Boyer) - The "lightened" design.
+ * @author msamuel@google.com (Mike Samuel) - Domain knowledge and regexes.
  */
 
 goog.provide('goog.uri.utils');
 goog.provide('goog.uri.utils.ComponentIndex');
+goog.provide('goog.uri.utils.QueryArray');
+goog.provide('goog.uri.utils.QueryValue');
+goog.provide('goog.uri.utils.StandardQueryParam');
 
 goog.require('goog.asserts');
 goog.require('goog.string');
+goog.require('goog.userAgent');
 
 
 /**
@@ -3215,10 +3853,13 @@ goog.uri.utils.ComponentIndex = {
  *     arbitrary strings may still look like path names.
  */
 goog.uri.utils.split = function(uri) {
+
   // See @return comment -- never null.
   return /** @type {!Array.<string|undefined>} */ (
       uri.match(goog.uri.utils.splitRe_));
 };
+
+
 
 
 /**
@@ -3257,6 +3898,24 @@ goog.uri.utils.getComponentByIndex_ = function(componentIndex, uri) {
 goog.uri.utils.getScheme = function(uri) {
   return goog.uri.utils.getComponentByIndex_(
       goog.uri.utils.ComponentIndex.SCHEME, uri);
+};
+
+
+/**
+ * Gets the effective scheme for the URL.  If the URL is relative then the
+ * scheme is derived from the page's location.
+ * @param {string} uri The URI to examine.
+ * @return {string} The protocol or scheme, always lower case.
+ */
+goog.uri.utils.getEffectiveScheme = function(uri) {
+  var scheme = goog.uri.utils.getScheme(uri);
+  if (!scheme && self.location) {
+    var protocol = self.location.protocol;
+    scheme = protocol.substr(0, protocol.length - 1);
+  }
+  // NOTE: When called from a web worker in Firefox 3.5, location maybe null.
+  // All other browsers with web workers support self.location from the worker.
+  return scheme ? scheme.toLowerCase() : '';
 };
 
 
@@ -3397,7 +4056,7 @@ goog.uri.utils.getHost = function(uri) {
 /**
  * Extracts the path of the URL and everything after.
  * @param {string} uri The URI string.
- * @return {?string} The URI, starting at the path and including the query
+ * @return {string} The URI, starting at the path and including the query
  *     parameters and fragment identifier.
  */
 goog.uri.utils.getPathAndAfter = function(uri) {
@@ -3546,25 +4205,23 @@ goog.uri.utils.appendQueryData_ = function(buffer) {
  */
 goog.uri.utils.appendKeyValuePairs_ = function(key, value, pairs) {
   if (goog.isArray(value)) {
-    // It's an array, so append all elements.  Here, we must convince
-    // jscompiler that it is, indeed, an array.
-    value = /** @type {Array} */ (value);
+    // Convince the compiler it's an array.
+    goog.asserts.assertArray(value);
     for (var j = 0; j < value.length; j++) {
-      pairs.push('&', key);
-      // Check for empty string, null and undefined get encoded
-      // into the url as literal strings
-      if (value[j] !== '') {
-        pairs.push('=', goog.string.urlEncode(value[j]));
-      }
+      // Convert to string explicitly, to short circuit the null and array
+      // logic in this function -- this ensures that null and undefined get
+      // written as literal 'null' and 'undefined', and arrays don't get
+      // expanded out but instead encoded in the default way.
+      goog.uri.utils.appendKeyValuePairs_(key, String(value[j]), pairs);
     }
   } else if (value != null) {
-    // Not null or undefined, so safe to append.
-    pairs.push('&', key);
-    // Check for empty string, null and undefined get encoded
-    // into the url as literal strings
-    if (value !== '') {
-      pairs.push('=', goog.string.urlEncode(value));
-    }
+    // Skip a top-level null or undefined entirely.
+    pairs.push('&', key,
+        // Check for empty string. Zero gets encoded into the url as literal
+        // strings.  For empty string, skip the equal sign, to be consistent
+        // with UriBuilder.java.
+        value === '' ? '' : '=',
+        goog.string.urlEncode(value));
   }
 };
 
@@ -3893,8 +4550,10 @@ goog.uri.utils.removeParam = function(uri, keyEncoded) {
 /**
  * Replaces all existing definitions of a parameter with a single definition.
  *
- * Repeated calls to this can exhibit quadratic behavior in IE6 due to the
- * way string append works, though it should be limited given the 2kb limit.
+ * Repeated calls to this can exhibit quadratic behavior due to the need to
+ * find existing instances and reconstruct the string, though it should be
+ * limited given the 2kb limit.  Consider using appendParams to append multiple
+ * parameters in bulk.
  *
  * @param {string} uri The original URI, which may already have query data.
  * @param {string} keyEncoded The key, which must already be URI encoded.
@@ -4602,7 +5261,7 @@ goog.array.peek = function(array) {
 goog.array.ARRAY_PROTOTYPE_ = Array.prototype;
 
 
-// NOTE(user): Since most of the array functions are generic it allows you to
+// NOTE(arv): Since most of the array functions are generic it allows you to
 // pass an array-like object. Strings have a length and are considered array-
 // like. However, the 'in' operator does not work on strings so we cannot just
 // use the array path even if the browser supports indexing into strings. We
@@ -4701,14 +5360,14 @@ goog.array.lastIndexOf = goog.NATIVE_ARRAY_PROTOTYPES &&
  *
  * @param {goog.array.ArrayLike} arr Array or array like object over
  *     which to iterate.
- * @param {Function} f The function to call for every element. This function
- *     takes 3 arguments (the element, the index and the array). The return
- *     value is ignored. The function is called only for indexes of the array
- *     which have assigned values; it is not called for indexes which have
- *     been deleted or which have never been assigned values.
- *
- * @param {Object=} opt_obj The object to be used as the value of 'this'
+ * @param {?function(this: T, ...)} f The function to call for every element.
+ *     This function takes 3 arguments (the element, the index and the array).
+ *     The return value is ignored. The function is called only for indexes of
+ *     the array which have assigned values; it is not called for indexes which
+ *     have been deleted or which have never been assigned values.
+ * @param {T=} opt_obj The object to be used as the value of 'this'
  *     within f.
+ * @template T
  */
 goog.array.forEach = goog.NATIVE_ARRAY_PROTOTYPES &&
                      goog.array.ARRAY_PROTOTYPE_.forEach ?
@@ -5225,25 +5884,6 @@ goog.array.concat = function(var_args) {
 
 
 /**
- * Does a shallow copy of an array.
- * @param {goog.array.ArrayLike} arr  Array or array-like object to clone.
- * @return {!Array} Clone of the input array.
- */
-goog.array.clone = function(arr) {
-  if (goog.isArray(arr)) {
-    return goog.array.concat(/** @type {!Array} */ (arr));
-  } else { // array like
-    // Concat does not work with non arrays.
-    var rv = [];
-    for (var i = 0, len = arr.length; i < len; i++) {
-      rv[i] = arr[i];
-    }
-    return rv;
-  }
-};
-
-
-/**
  * Converts an object to an array.
  * @param {goog.array.ArrayLike} object  The object to convert to an array.
  * @return {!Array} The object converted into an array. If object has a
@@ -5252,15 +5892,28 @@ goog.array.clone = function(arr) {
  *     have a length property, an empty array will be returned.
  */
 goog.array.toArray = function(object) {
-  if (goog.isArray(object)) {
-    // This fixes the JS compiler warning and forces the Object to an Array type
-    return goog.array.concat(/** @type {!Array} */ (object));
+  var length = object.length;
+
+  // If length is not a number the following it false. This case is kept for
+  // backwards compatibility since there are callers that pass objects that are
+  // not array like.
+  if (length > 0) {
+    var rv = new Array(length);
+    for (var i = 0; i < length; i++) {
+      rv[i] = object[i];
+    }
+    return rv;
   }
-  // Clone what we hope to be an array-like object to an array.
-  // We could check isArrayLike() first, but no check we perform would be as
-  // reliable as simply making the call.
-  return goog.array.clone(/** @type {Array} */ (object));
+  return [];
 };
+
+
+/**
+ * Does a shallow copy of an array.
+ * @param {goog.array.ArrayLike} arr  Array or array-like object to clone.
+ * @return {!Array} Clone of the input array.
+ */
+goog.array.clone = goog.array.toArray;
 
 
 /**
@@ -5527,7 +6180,7 @@ goog.array.binarySearch_ = function(arr, compareFn, isEvaluator, opt_target,
  *     first argument is less than, equal to, or greater than the second.
  */
 goog.array.sort = function(arr, opt_compareFn) {
-  // TODO(user): Update type annotation since null is not accepted.
+  // TODO(arv): Update type annotation since null is not accepted.
   goog.asserts.assert(arr.length != null);
 
   goog.array.ARRAY_PROTOTYPE_.sort.call(
@@ -5546,7 +6199,7 @@ goog.array.sort = function(arr, opt_compareFn) {
  * O(n) overhead of copying the array twice.
  *
  * @param {Array} arr The array to be sorted.
- * @param {function(*, *): number=} opt_compareFn Optional comparison function
+ * @param {function(?, ?): number=} opt_compareFn Optional comparison function
  *     by which the array is to be ordered. Should take 2 arguments to compare,
  *     and return a negative number, zero, or a positive number depending on
  *     whether the first argument is less than, equal to, or greater than the
@@ -5650,6 +6303,32 @@ goog.array.compare = function(arr1, arr2, opt_equalsFn) {
 
 
 /**
+ * 3-way array compare function.
+ * @param {!goog.array.ArrayLike} arr1 The first array to compare.
+ * @param {!goog.array.ArrayLike} arr2 The second array to compare.
+ * @param {(function(?, ?): number)=} opt_compareFn Optional comparison function
+ *     by which the array is to be ordered. Should take 2 arguments to compare,
+ *     and return a negative number, zero, or a positive number depending on
+ *     whether the first argument is less than, equal to, or greater than the
+ *     second.
+ * @return {number} Negative number, zero, or a positive number depending on
+ *     whether the first argument is less than, equal to, or greater than the
+ *     second.
+ */
+goog.array.compare3 = function(arr1, arr2, opt_compareFn) {
+  var compare = opt_compareFn || goog.array.defaultCompare;
+  var l = Math.min(arr1.length, arr2.length);
+  for (var i = 0; i < l; i++) {
+    var result = compare(arr1[i], arr2[i]);
+    if (result != 0) {
+      return result;
+    }
+  }
+  return goog.array.defaultCompare(arr1.length, arr2.length);
+};
+
+
+/**
  * Compares its two arguments for order, using the built in < and >
  * operators.
  * @param {*} a The first object to be compared.
@@ -5743,7 +6422,7 @@ goog.array.bucket = function(array, sorter) {
  *
  * @param {*} value The value to repeat.
  * @param {number} n The repeat count.
- * @return {!Array.<*>} An array with the repeated value.
+ * @return {!Array} An array with the repeated value.
  */
 goog.array.repeat = function(value, n) {
   var array = [];
@@ -5876,6 +6555,7 @@ goog.array.shuffle = function(arr, opt_randFn) {
 
 /**
  * @fileoverview Python style iteration utilities.
+ * @author arv@google.com (Erik Arvidsson)
  */
 
 
@@ -5887,7 +6567,7 @@ goog.require('goog.array');
 goog.require('goog.asserts');
 
 
-// TODO(user): Add more functions from Python's itertools.
+// TODO(nnaze): Add more functions from Python's itertools.
 // http://docs.python.org/library/itertools.html
 
 
@@ -5987,7 +6667,7 @@ goog.iter.toIterator = function(iterable) {
   }
 
 
-  // TODO(user): Should we fall back on goog.structs.getValues()?
+  // TODO(arv): Should we fall back on goog.structs.getValues()?
   throw Error('Not implemented');
 };
 
@@ -6050,12 +6730,12 @@ goog.iter.forEach = function(iterable, f, opt_obj) {
  *     passed the test are present.
  */
 goog.iter.filter = function(iterable, f, opt_obj) {
-  iterable = goog.iter.toIterator(iterable);
+  var iterator = goog.iter.toIterator(iterable);
   var newIter = new goog.iter.Iterator;
   newIter.next = function() {
     while (true) {
-      var val = iterable.next();
-      if (f.call(opt_obj, val, undefined, iterable)) {
+      var val = iterator.next();
+      if (f.call(opt_obj, val, undefined, iterator)) {
         return val;
       }
     }
@@ -6132,12 +6812,12 @@ goog.iter.join = function(iterable, deliminator) {
  *     applying the function to each element in the original iterator.
  */
 goog.iter.map = function(iterable, f, opt_obj) {
-  iterable = goog.iter.toIterator(iterable);
+  var iterator = goog.iter.toIterator(iterable);
   var newIter = new goog.iter.Iterator;
   newIter.next = function() {
     while (true) {
-      var val = iterable.next();
-      return f.call(opt_obj, val, undefined, iterable);
+      var val = iterator.next();
+      return f.call(opt_obj, val, undefined, iterator);
     }
   };
   return newIter;
@@ -6283,13 +6963,13 @@ goog.iter.chain = function(var_args) {
  *     original iterator as long as {@code f} is true.
  */
 goog.iter.dropWhile = function(iterable, f, opt_obj) {
-  iterable = goog.iter.toIterator(iterable);
+  var iterator = goog.iter.toIterator(iterable);
   var newIter = new goog.iter.Iterator;
   var dropping = true;
   newIter.next = function() {
     while (true) {
-      var val = iterable.next();
-      if (dropping && f.call(opt_obj, val, undefined, iterable)) {
+      var val = iterator.next();
+      if (dropping && f.call(opt_obj, val, undefined, iterator)) {
         continue;
       } else {
         dropping = false;
@@ -6313,14 +6993,14 @@ goog.iter.dropWhile = function(iterable, f, opt_obj) {
  *     original iterator as long as the function is true.
  */
 goog.iter.takeWhile = function(iterable, f, opt_obj) {
-  iterable = goog.iter.toIterator(iterable);
+  var iterator = goog.iter.toIterator(iterable);
   var newIter = new goog.iter.Iterator;
   var taking = true;
   newIter.next = function() {
     while (true) {
       if (taking) {
-        var val = iterable.next();
-        if (f.call(opt_obj, val, undefined, iterable)) {
+        var val = iterator.next();
+        if (f.call(opt_obj, val, undefined, iterator)) {
           return val;
         } else {
           taking = false;
@@ -6487,6 +7167,64 @@ goog.iter.product = function(var_args) {
 
   return iter;
 };
+
+
+/**
+ * Create an iterator to cycle over the iterable's elements indefinitely.
+ * For example, ([1, 2, 3]) would return : 1, 2, 3, 1, 2, 3, ...
+ * @see: http://docs.python.org/library/itertools.html#itertools.cycle.
+ * @param {!goog.iter.Iterable} iterable The iterable object.
+ * @return {!goog.iter.Iterator} An iterator that iterates indefinitely over
+ * the values in {@code iterable}.
+ */
+goog.iter.cycle = function(iterable) {
+
+  var baseIterator = goog.iter.toIterator(iterable);
+
+  // We maintain a cache to store the iterable elements as we iterate
+  // over them. The cache is used to return elements once we have
+  // iterated over the iterable once.
+  var cache = [];
+  var cacheIndex = 0;
+
+  var iter = new goog.iter.Iterator();
+
+  // This flag is set after the iterable is iterated over once
+  var useCache = false;
+
+  iter.next = function() {
+    var returnElement = null;
+
+    // Pull elements off the original iterator if not using cache
+    if (!useCache) {
+
+      try {
+        // Return the element from the iterable
+        returnElement = baseIterator.next();
+        cache.push(returnElement);
+        return returnElement;
+      } catch (e) {
+        // If an exception other than StopIteration is thrown
+        // or if there are no elements to iterate over (the iterable was empty)
+        // throw an exception
+        if (e != goog.iter.StopIteration || goog.array.isEmpty(cache)) {
+          throw e;
+        }
+        // set useCache to true after we know that a 'StopIteration' exception
+        // was thrown and the cache is not empty (to handle the 'empty iterable'
+        // use case)
+        useCache = true;
+      }
+    }
+
+    returnElement = cache[cacheIndex];
+    cacheIndex = (cacheIndex + 1) % cache.length;
+
+    return returnElement;
+  };
+
+  return iter;
+};
 // Copyright 2006 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -6504,6 +7242,7 @@ goog.iter.product = function(var_args) {
 /**
  * @fileoverview Generics method for collection-like classes and objects.
  *
+ * @author arv@google.com (Erik Arvidsson)
  *
  * This file contains functions to work with collections. It supports using
  * Map, Set, Array and Object and other classes that implement collection-like
@@ -6634,7 +7373,7 @@ goog.structs.isEmpty = function(col) {
  * @param {Object} col The collection-like object.
  */
 goog.structs.clear = function(col) {
-  // NOTE(user): This should not contain strings because strings are immutable
+  // NOTE(arv): This should not contain strings because strings are immutable
   if (typeof col.clear == 'function') {
     col.clear();
   } else if (goog.isArrayLike(col)) {
@@ -6845,6 +7584,8 @@ goog.structs.every = function(col, f, opt_obj) {
 /**
  * @fileoverview Datastructure: Hash Map.
  *
+ * @author arv@google.com (Erik Arvidsson)
+ * @author jonp@google.com (Jon Perlow) Optimized for IE6
  *
  * This file contains an implementation of a Map structure. It implements a lot
  * of the methods used in goog.structs so those functions work on hashes.  For
@@ -6988,7 +7729,7 @@ goog.structs.Map.prototype.containsValue = function(val) {
 /**
  * Whether this map is equal to the argument map.
  * @param {goog.structs.Map} otherMap The map against which to test equality.
- * @param {function(*, *) : boolean=} opt_equalityFn Optional equality function
+ * @param {function(?, ?) : boolean=} opt_equalityFn Optional equality function
  *     to test equality of values. If not specified, this will test whether
  *     the values contained in each map are identical objects.
  * @return {boolean} Whether the maps are equal.
@@ -7131,6 +7872,7 @@ goog.structs.Map.prototype.get = function(key, opt_val) {
  * Adds a key-value pair to the map.
  * @param {*} key The key.
  * @param {*} value The value to add.
+ * @return {*} Some subclasses return a value.
  */
 goog.structs.Map.prototype.set = function(key, value) {
   if (!(goog.structs.Map.hasKey_(this.map_, key))) {
@@ -7342,8 +8084,8 @@ goog.Uri = function(opt_uri, opt_ignoreCase) {
   // Parse in the uri string
   var m;
   if (opt_uri instanceof goog.Uri) {
-    this.setIgnoreCase(opt_ignoreCase == null ?
-        opt_uri.getIgnoreCase() : opt_ignoreCase);
+    this.ignoreCase_ = goog.isDef(opt_ignoreCase) ?
+        opt_ignoreCase : opt_uri.getIgnoreCase();
     this.setScheme(opt_uri.getScheme());
     this.setUserInfo(opt_uri.getUserInfo());
     this.setDomain(opt_uri.getDomain());
@@ -7352,8 +8094,9 @@ goog.Uri = function(opt_uri, opt_ignoreCase) {
     this.setQueryData(opt_uri.getQueryData().clone());
     this.setFragment(opt_uri.getFragment());
   } else if (opt_uri && (m = goog.uri.utils.split(String(opt_uri)))) {
+    this.ignoreCase_ = !!opt_ignoreCase;
+
     // Set the parts -- decoding as we do so.
-    this.setIgnoreCase(!!opt_ignoreCase);
     // COMPATABILITY NOTE - In IE, unmatched fields may be empty strings,
     // whereas in other browsers they will be undefined.
     this.setScheme(m[goog.uri.utils.ComponentIndex.SCHEME] || '', true);
@@ -7361,16 +8104,30 @@ goog.Uri = function(opt_uri, opt_ignoreCase) {
     this.setDomain(m[goog.uri.utils.ComponentIndex.DOMAIN] || '', true);
     this.setPort(m[goog.uri.utils.ComponentIndex.PORT]);
     this.setPath(m[goog.uri.utils.ComponentIndex.PATH] || '', true);
-
-    this.setQuery(m[goog.uri.utils.ComponentIndex.QUERY_DATA] || '', true);
-
+    this.setQueryData(m[goog.uri.utils.ComponentIndex.QUERY_DATA] || '', true);
     this.setFragment(m[goog.uri.utils.ComponentIndex.FRAGMENT] || '', true);
 
   } else {
-    this.setIgnoreCase(!!opt_ignoreCase);
-    this.queryData_ = new goog.Uri.QueryData(null, this, this.ignoreCase_);
+    this.ignoreCase_ = !!opt_ignoreCase;
+    this.queryData_ = new goog.Uri.QueryData(null, null, this.ignoreCase_);
   }
 };
+
+
+/**
+ * If true, we preserve the type of query parameters set programmatically.
+ *
+ * This means that if you set a parameter to a boolean, and then call
+ * getParameterValue, you will get a boolean back.
+ *
+ * If false, we will coerce parameters to strings, just as they would
+ * appear in real URIs.
+ *
+ * TODO(nicksantos): Remove this once people have time to fix all tests.
+ *
+ * @type {boolean}
+ */
+goog.Uri.preserveParameterTypesCompatibilityFlag = false;
 
 
 /**
@@ -7422,7 +8179,7 @@ goog.Uri.prototype.path_ = '';
 
 /**
  * Object representing query data.
- * @type {goog.Uri.QueryData}
+ * @type {!goog.Uri.QueryData}
  * @private
  */
 goog.Uri.prototype.queryData_;
@@ -7454,52 +8211,58 @@ goog.Uri.prototype.ignoreCase_ = false;
 
 /**
  * @return {string} The string form of the url.
+ * @override
  */
 goog.Uri.prototype.toString = function() {
-  if (this.cachedToString_) {
-    return this.cachedToString_;
-  }
-
   var out = [];
 
-  if (this.scheme_) {
+  var scheme = this.getScheme();
+  if (scheme) {
     out.push(goog.Uri.encodeSpecialChars_(
-        this.scheme_, goog.Uri.reDisallowedInSchemeOrUserInfo_), ':');
+        scheme, goog.Uri.reDisallowedInSchemeOrUserInfo_), ':');
   }
 
-  if (this.domain_) {
+  var domain = this.getDomain();
+  if (domain) {
     out.push('//');
 
-    if (this.userInfo_) {
+    var userInfo = this.getUserInfo();
+    if (userInfo) {
       out.push(goog.Uri.encodeSpecialChars_(
-          this.userInfo_, goog.Uri.reDisallowedInSchemeOrUserInfo_), '@');
+          userInfo, goog.Uri.reDisallowedInSchemeOrUserInfo_), '@');
     }
 
-    out.push(goog.Uri.encodeString_(this.domain_));
+    out.push(goog.string.urlEncode(domain));
 
-    if (this.port_ != null) {
-      out.push(':', String(this.getPort()));
+    var port = this.getPort();
+    if (port != null) {
+      out.push(':', String(port));
     }
   }
 
-  if (this.path_) {
-    if (this.hasDomain() && this.path_.charAt(0) != '/') {
+  var path = this.getPath();
+  if (path) {
+    if (this.hasDomain() && path.charAt(0) != '/') {
       out.push('/');
     }
     out.push(goog.Uri.encodeSpecialChars_(
-        this.path_, goog.Uri.reDisallowedInPath_));
+        path,
+        path.charAt(0) == '/' ?
+            goog.Uri.reDisallowedInAbsolutePath_ :
+            goog.Uri.reDisallowedInRelativePath_));
   }
 
-  var query = String(this.queryData_);
+  var query = this.getEncodedQuery();
   if (query) {
     out.push('?', query);
   }
 
-  if (this.fragment_) {
+  var fragment = this.getFragment();
+  if (fragment) {
     out.push('#', goog.Uri.encodeSpecialChars_(
-        this.fragment_, goog.Uri.reDisallowedInFragment_));
+        fragment, goog.Uri.reDisallowedInFragment_));
   }
-  return this.cachedToString_ = out.join('');
+  return out.join('');
 };
 
 
@@ -7517,7 +8280,7 @@ goog.Uri.prototype.toString = function() {
  * segments will be resolved, as described in RFC 3986.
  *
  * @param {goog.Uri} relativeUri The relative url to resolve.
- * @return {goog.Uri} The resolved URI.
+ * @return {!goog.Uri} The resolved URI.
  */
 goog.Uri.prototype.resolve = function(relativeUri) {
 
@@ -7577,7 +8340,7 @@ goog.Uri.prototype.resolve = function(relativeUri) {
   }
 
   if (overridden) {
-    absoluteUri.setQuery(relativeUri.getDecodedQuery());
+    absoluteUri.setQueryData(relativeUri.getDecodedQuery());
   } else {
     overridden = relativeUri.hasFragment();
   }
@@ -7595,9 +8358,7 @@ goog.Uri.prototype.resolve = function(relativeUri) {
  * @return {!goog.Uri} New instance of the URI objcet.
  */
 goog.Uri.prototype.clone = function() {
-  return goog.Uri.create(this.scheme_, this.userInfo_, this.domain_,
-                         this.port_, this.path_, this.queryData_.clone(),
-                         this.fragment_, this.ignoreCase_);
+  return new goog.Uri(this);
 };
 
 
@@ -7613,11 +8374,10 @@ goog.Uri.prototype.getScheme = function() {
  * Sets the scheme/protocol.
  * @param {string} newScheme New scheme value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setScheme = function(newScheme, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
   this.scheme_ = opt_decode ? goog.Uri.decodeOrEmpty_(newScheme) : newScheme;
 
   // remove an : at the end of the scheme so somebody can pass in
@@ -7649,11 +8409,10 @@ goog.Uri.prototype.getUserInfo = function() {
  * Sets the userInfo.
  * @param {string} newUserInfo New userInfo value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setUserInfo = function(newUserInfo, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
   this.userInfo_ = opt_decode ? goog.Uri.decodeOrEmpty_(newUserInfo) :
                    newUserInfo;
   return this;
@@ -7680,11 +8439,10 @@ goog.Uri.prototype.getDomain = function() {
  * Sets the domain.
  * @param {string} newDomain New domain value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setDomain = function(newDomain, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
   this.domain_ = opt_decode ? goog.Uri.decodeOrEmpty_(newDomain) : newDomain;
   return this;
 };
@@ -7709,11 +8467,10 @@ goog.Uri.prototype.getPort = function() {
 /**
  * Sets the port number.
  * @param {*} newPort Port number. Will be explicitly casted to a number.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setPort = function(newPort) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
 
   if (newPort) {
     newPort = Number(newPort);
@@ -7749,11 +8506,10 @@ goog.Uri.prototype.getPath = function() {
  * Sets the path.
  * @param {string} newPath New path value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setPath = function(newPath, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
   this.path_ = opt_decode ? goog.Uri.decodeOrEmpty_(newPath) : newPath;
   return this;
 };
@@ -7780,25 +8536,22 @@ goog.Uri.prototype.hasQuery = function() {
  * @param {goog.Uri.QueryData|string|undefined} queryData QueryData object.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
  *     Applies only if queryData is a string.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setQueryData = function(queryData, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
 
   if (queryData instanceof goog.Uri.QueryData) {
     this.queryData_ = queryData;
-    this.queryData_.uri_ = this;
     this.queryData_.setIgnoreCase(this.ignoreCase_);
   } else {
-    // QueryData accepts encoded query string,
-    // so encode it if opt_decode flag is not true.
     if (!opt_decode) {
+      // QueryData accepts encoded query string, so encode it if
+      // opt_decode flag is not true.
       queryData = goog.Uri.encodeSpecialChars_(queryData,
                                                goog.Uri.reDisallowedInQuery_);
     }
-    this.queryData_ =
-        new goog.Uri.QueryData(queryData, this, this.ignoreCase_);
+    this.queryData_ = new goog.Uri.QueryData(queryData, null, this.ignoreCase_);
   }
 
   return this;
@@ -7809,7 +8562,7 @@ goog.Uri.prototype.setQueryData = function(queryData, opt_decode) {
  * Sets the URI query.
  * @param {string} newQuery New query value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setQuery = function(newQuery, opt_decode) {
   return this.setQueryData(newQuery, opt_decode);
@@ -7858,12 +8611,10 @@ goog.Uri.prototype.getQuery = function() {
  *
  * @param {string} key The parameter to set.
  * @param {*} value The new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setParameterValue = function(key, value) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
-
   this.queryData_.set(key, value);
   return this;
 };
@@ -7880,11 +8631,10 @@ goog.Uri.prototype.setParameterValue = function(key, value) {
  * @param {string} key The parameter to set.
  * @param {*} values The new values. If values is a single
  *     string then it will be treated as the sole value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setParameterValues = function(key, values) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
 
   if (!goog.isArray(values)) {
     values = [String(values)];
@@ -7913,12 +8663,15 @@ goog.Uri.prototype.getParameterValues = function(name) {
  * Returns the first value for a given cgi parameter or undefined if the given
  * parameter name does not appear in the query string.
  * @param {string} paramName Unescaped parameter name.
- * @return {*} The first value for a given cgi parameter or
+ * @return {string|undefined} The first value for a given cgi parameter or
  *     undefined if the given parameter name does not appear in the query
  *     string.
  */
 goog.Uri.prototype.getParameterValue = function(paramName) {
-  return this.queryData_.get(paramName);
+  // NOTE(nicksantos): This type-cast is a lie when
+  // preserveParameterTypesCompatibilityFlag is set to true.
+  // But this should only be set to true in tests.
+  return /** @type {string|undefined} */ (this.queryData_.get(paramName));
 };
 
 
@@ -7934,11 +8687,10 @@ goog.Uri.prototype.getFragment = function() {
  * Sets the URI fragment.
  * @param {string} newFragment New fragment value.
  * @param {boolean=} opt_decode Optional param for whether to decode new value.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.setFragment = function(newFragment, opt_decode) {
   this.enforceReadOnly();
-  delete this.cachedToString_;
   this.fragment_ = opt_decode ? goog.Uri.decodeOrEmpty_(newFragment) :
                    newFragment;
   return this;
@@ -7968,7 +8720,7 @@ goog.Uri.prototype.hasSameDomainAs = function(uri2) {
 
 /**
  * Adds a random parameter to the Uri.
- * @return {goog.Uri} Reference to this Uri object.
+ * @return {!goog.Uri} Reference to this Uri object.
  */
 goog.Uri.prototype.makeUnique = function() {
   this.enforceReadOnly();
@@ -7982,7 +8734,7 @@ goog.Uri.prototype.makeUnique = function() {
  * Removes the named query parameter.
  *
  * @param {string} key The parameter to remove.
- * @return {goog.Uri} Reference to this URI object.
+ * @return {!goog.Uri} Reference to this URI object.
  */
 goog.Uri.prototype.removeParameter = function(key) {
   this.enforceReadOnly();
@@ -7996,7 +8748,7 @@ goog.Uri.prototype.removeParameter = function(key) {
  * enforceReadOnly_ will be called at the start of any function that may modify
  * this Uri.
  * @param {boolean} isReadOnly whether this goog.Uri should be read only.
- * @return {goog.Uri} Reference to this Uri object.
+ * @return {!goog.Uri} Reference to this Uri object.
  */
 goog.Uri.prototype.setReadOnly = function(isReadOnly) {
   this.isReadOnly_ = isReadOnly;
@@ -8028,7 +8780,7 @@ goog.Uri.prototype.enforceReadOnly = function() {
  * NOTE: If there are already key/value pairs in the QueryData, and
  * ignoreCase_ is set to false, the keys will all be lower-cased.
  * @param {boolean} ignoreCase whether this goog.Uri should ignore case.
- * @return {goog.Uri} Reference to this Uri object.
+ * @return {!goog.Uri} Reference to this Uri object.
  */
 goog.Uri.prototype.setIgnoreCase = function(ignoreCase) {
   this.ignoreCase_ = ignoreCase;
@@ -8060,7 +8812,7 @@ goog.Uri.prototype.getIgnoreCase = function() {
  *     object.
  * @param {boolean=} opt_ignoreCase Whether to ignore the case of parameter
  * names in #getParameterValue.
- * @return {goog.Uri} The new URI object.
+ * @return {!goog.Uri} The new URI object.
  */
 goog.Uri.parse = function(uri, opt_ignoreCase) {
   return uri instanceof goog.Uri ?
@@ -8107,7 +8859,7 @@ goog.Uri.create = function(opt_scheme, opt_userInfo, opt_domain, opt_port,
  *
  * @param {*} base Base Uri.
  * @param {*} rel Relative Uri.
- * @return {goog.Uri} Resolved uri.
+ * @return {!goog.Uri} Resolved uri.
  */
 goog.Uri.resolve = function(base, rel) {
   if (!(base instanceof goog.Uri)) {
@@ -8182,28 +8934,6 @@ goog.Uri.decodeOrEmpty_ = function(val) {
 
 
 /**
- * URI encode a string, or return null if it's not a string.
- * @param {*} unescapedPart Unescaped string.
- * @return {?string} Escaped string.
- * @private
- */
-goog.Uri.encodeString_ = function(unescapedPart) {
-  if (goog.isString(unescapedPart)) {
-    return encodeURIComponent(unescapedPart);
-  }
-  return null;
-};
-
-
-/**
- * Regular expression used for determining if a string needs to be encoded.
- * @type {RegExp}
- * @private
- */
-goog.Uri.encodeSpecialRegExp_ = /^[a-zA-Z0-9\-_.!~*'():\/;?]*$/;
-
-
-/**
  * If unescapedPart is non null, then escapes any characters in it that aren't
  * valid characters in a url and also escapes any special characters that
  * appear in extra.
@@ -8214,21 +8944,10 @@ goog.Uri.encodeSpecialRegExp_ = /^[a-zA-Z0-9\-_.!~*'():\/;?]*$/;
  * @private
  */
 goog.Uri.encodeSpecialChars_ = function(unescapedPart, extra) {
-  var ret = null;
   if (goog.isString(unescapedPart)) {
-    ret = unescapedPart;
-    // Checking if the search matches before calling encodeURI avoids an extra
-    // allocation in IE6
-    if (!goog.Uri.encodeSpecialRegExp_.test(ret)) {
-      ret = encodeURI(unescapedPart);
-    }
-    // Checking if the search matches before calling replace avoids an extra
-    // allocation in IE6
-    if (ret.search(extra) >= 0) {
-      ret = ret.replace(extra, goog.Uri.encodeChar_);
-    }
+    return encodeURI(unescapedPart).replace(extra, goog.Uri.encodeChar_);
   }
-  return ret;
+  return null;
 };
 
 
@@ -8254,11 +8973,19 @@ goog.Uri.reDisallowedInSchemeOrUserInfo_ = /[#\/\?@]/g;
 
 
 /**
- * Regular expression for characters that are disallowed in the path.
+ * Regular expression for characters that are disallowed in a relative path.
  * @type {RegExp}
  * @private
  */
-goog.Uri.reDisallowedInPath_ = /[\#\?]/g;
+goog.Uri.reDisallowedInRelativePath_ = /[\#\?:]/g;
+
+
+/**
+ * Regular expression for characters that are disallowed in an absolute path.
+ * @type {RegExp}
+ * @private
+ */
+goog.Uri.reDisallowedInAbsolutePath_ = /[\#\?]/g;
 
 
 /**
@@ -8285,7 +9012,7 @@ goog.Uri.reDisallowedInFragment_ = /#/g;
  */
 goog.Uri.haveSameDomain = function(uri1String, uri2String) {
   // Differs from goog.uri.utils.haveSameDomain, since this ignores scheme.
-  // TODO(user): Have this just call goog.uri.util.haveSameDomain.
+  // TODO(gboyer): Have this just call goog.uri.util.haveSameDomain.
   var pieces1 = goog.uri.utils.split(uri1String);
   var pieces2 = goog.uri.utils.split(uri2String);
   return pieces1[goog.uri.utils.ComponentIndex.DOMAIN] ==
@@ -8304,8 +9031,9 @@ goog.Uri.haveSameDomain = function(uri1String, uri2String) {
  *
  * @param {?string=} opt_query Optional encoded query string to parse into
  *     the object.
- * @param {goog.Uri=} opt_uri Optional uri object that should have its cache
- *     invalidated when this object updates.
+ * @param {goog.Uri=} opt_uri Optional uri object that should have its
+ *     cache invalidated when this object updates. Deprecated -- this
+ *     is no longer required.
  * @param {boolean=} opt_ignoreCase If true, ignore the case of the parameter
  *     name in #get.
  * @constructor
@@ -8317,14 +9045,6 @@ goog.Uri.QueryData = function(opt_query, opt_uri, opt_ignoreCase) {
    * @private
    */
   this.encodedQuery_ = opt_query || null;
-
-  /**
-   * Reference to a uri object which uses the query data.  This allows the
-   * QueryData object to invalidate the cache.
-   * @type {goog.Uri}
-   * @private
-   */
-  this.uri_ = opt_uri || null;
 
   /**
    * If true, ignore the case of the parameter name in #get.
@@ -8343,6 +9063,7 @@ goog.Uri.QueryData = function(opt_query, opt_uri, opt_ignoreCase) {
 goog.Uri.QueryData.prototype.ensureKeyMapInitialized_ = function() {
   if (!this.keyMap_) {
     this.keyMap_ = new goog.structs.Map();
+    this.count_ = 0;
 
     if (this.encodedQuery_) {
       var pairs = this.encodedQuery_.split('&');
@@ -8368,8 +9089,10 @@ goog.Uri.QueryData.prototype.ensureKeyMapInitialized_ = function() {
 /**
  * Creates a new query data instance from a map of names and values.
  *
- * @param {!goog.structs.Map|!Object} map Map of string parameter names to
- *     string parameter values.
+ * @param {!goog.structs.Map|!Object} map Map of string parameter
+ *     names to parameter value. If parameter value is an array, it is
+ *     treated as if the key maps to each individual value in the
+ *     array.
  * @param {goog.Uri=} opt_uri URI object that should have its cache
  *     invalidated when this object updates.
  * @param {boolean=} opt_ignoreCase If true, ignore the case of the parameter
@@ -8381,11 +9104,19 @@ goog.Uri.QueryData.createFromMap = function(map, opt_uri, opt_ignoreCase) {
   if (typeof keys == 'undefined') {
     throw Error('Keys are undefined');
   }
-  return goog.Uri.QueryData.createFromKeysValues(
-      keys,
-      goog.structs.getValues(map),
-      opt_uri,
-      opt_ignoreCase);
+
+  var queryData = new goog.Uri.QueryData(null, null, opt_ignoreCase);
+  var values = goog.structs.getValues(map);
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = values[i];
+    if (!goog.isArray(value)) {
+      queryData.add(key, value);
+    } else {
+      queryData.setValues(key, value);
+    }
+  }
+  return queryData;
 };
 
 
@@ -8407,7 +9138,7 @@ goog.Uri.QueryData.createFromKeysValues = function(
   if (keys.length != values.length) {
     throw Error('Mismatched lengths for keys/values');
   }
-  var queryData = new goog.Uri.QueryData(null, opt_uri, opt_ignoreCase);
+  var queryData = new goog.Uri.QueryData(null, null, opt_ignoreCase);
   for (var i = 0; i < keys.length; i++) {
     queryData.add(keys[i], values[i]);
   }
@@ -8422,7 +9153,7 @@ goog.Uri.QueryData.createFromKeysValues = function(
  * We need to use a Map because we cannot guarantee that the key names will
  * not be problematic for IE.
  *
- * @type {Object}
+ * @type {goog.structs.Map}
  * @private
  */
 goog.Uri.QueryData.prototype.keyMap_ = null;
@@ -8434,14 +9165,6 @@ goog.Uri.QueryData.prototype.keyMap_ = null;
  * @private
  */
 goog.Uri.QueryData.prototype.count_ = null;
-
-
-/**
- * Decoded query string, or null if it requires computing.
- * @type {?string}
- * @private
- */
-goog.Uri.QueryData.decodedQuery_ = null;
 
 
 /**
@@ -8457,26 +9180,19 @@ goog.Uri.QueryData.prototype.getCount = function() {
  * Adds a key value pair.
  * @param {string} key Name.
  * @param {*} value Value.
- * @return {goog.Uri.QueryData} Instance of this object.
+ * @return {!goog.Uri.QueryData} Instance of this object.
  */
 goog.Uri.QueryData.prototype.add = function(key, value) {
   this.ensureKeyMapInitialized_();
   this.invalidateCache_();
 
   key = this.getKeyName_(key);
-  if (!this.containsKey(key)) {
-    this.keyMap_.set(key, value);
-  } else {
-    var current = this.keyMap_.get(key);
-    if (goog.isArray(current)) {
-      current.push(value);
-    } else {
-      this.keyMap_.set(key, [current, value]);
-    }
+  var values = this.keyMap_.get(key);
+  if (!values) {
+    this.keyMap_.set(key, (values = []));
   }
-
+  values.push(value);
   this.count_++;
-
   return this;
 };
 
@@ -8493,13 +9209,8 @@ goog.Uri.QueryData.prototype.remove = function(key) {
   if (this.keyMap_.containsKey(key)) {
     this.invalidateCache_();
 
-    // we need to get it to know how many to decrement the count with
-    var old = this.keyMap_.get(key);
-    if (goog.isArray(old)) {
-      this.count_ -= old.length;
-    } else {
-      this.count_--;
-    }
+    // Decrement parameter count.
+    this.count_ -= this.keyMap_.get(key).length;
     return this.keyMap_.remove(key);
   }
   return false;
@@ -8511,9 +9222,7 @@ goog.Uri.QueryData.prototype.remove = function(key) {
  */
 goog.Uri.QueryData.prototype.clear = function() {
   this.invalidateCache_();
-  if (this.keyMap_) {
-    this.keyMap_.clear();
-  }
+  this.keyMap_ = null;
   this.count_ = 0;
 };
 
@@ -8545,7 +9254,7 @@ goog.Uri.QueryData.prototype.containsKey = function(key) {
  * @return {boolean} Whether there is a parameter with the given value.
  */
 goog.Uri.QueryData.prototype.containsValue = function(value) {
-  // NOTE(user): This solution goes through all the params even if it was the
+  // NOTE(arv): This solution goes through all the params even if it was the
   // first param. We can get around this by not reusing code or by switching to
   // iterators.
   var vals = this.getValues();
@@ -8556,21 +9265,17 @@ goog.Uri.QueryData.prototype.containsValue = function(value) {
 /**
  * Returns all the keys of the parameters. If a key is used multiple times
  * it will be included multiple times in the returned array
- * @return {Array} All the keys of the parameters.
+ * @return {!Array} All the keys of the parameters.
  */
 goog.Uri.QueryData.prototype.getKeys = function() {
   this.ensureKeyMapInitialized_();
   // We need to get the values to know how many keys to add.
-  var vals = this.keyMap_.getValues(); // Array.<Array|String>
-  var keys = this.keyMap_.getKeys(); // Array.<String>
+  var vals = /** @type {Array.<Array|*>} */ (this.keyMap_.getValues());
+  var keys = this.keyMap_.getKeys();
   var rv = [];
   for (var i = 0; i < keys.length; i++) {
     var val = vals[i];
-    if (goog.isArray(val)) {
-      for (var j = 0; j < val.length; j++) {
-        rv.push(keys[i]);
-      }
-    } else {
+    for (var j = 0; j < val.length; j++) {
       rv.push(keys[i]);
     }
   }
@@ -8583,35 +9288,20 @@ goog.Uri.QueryData.prototype.getKeys = function() {
  * data has no such key this will return an empty array. If no key is given
  * all values wil be returned.
  * @param {string=} opt_key The name of the parameter to get the values for.
- * @return {Array} All the values of the parameters with the given name.
+ * @return {!Array} All the values of the parameters with the given name.
  */
 goog.Uri.QueryData.prototype.getValues = function(opt_key) {
   this.ensureKeyMapInitialized_();
-  var rv;
+  var rv = [];
   if (opt_key) {
-    var key = this.getKeyName_(opt_key);
-    if (this.containsKey(key)) {
-      var value = this.keyMap_.get(key);
-      if (goog.isArray(value)) {
-        return value;
-      } else {
-        rv = [];
-        rv.push(value);
-      }
-    } else {
-      rv = [];
+    if (this.containsKey(opt_key)) {
+      rv = goog.array.concat(rv, this.keyMap_.get(this.getKeyName_(opt_key)));
     }
   } else {
-    // return all values
-    var vals = this.keyMap_.getValues(); // Array.<Array|String>
-    rv = [];
-    for (var i = 0; i < vals.length; i++) {
-      var val = vals[i];
-      if (goog.isArray(val)) {
-        goog.array.extend(rv, val);
-      } else {
-        rv.push(val);
-      }
+    // Return all values.
+    var values = /** @type {Array.<Array|*>} */ (this.keyMap_.getValues());
+    for (var i = 0; i < values.length; i++) {
+      rv = goog.array.concat(rv, values[i]);
     }
   }
   return rv;
@@ -8623,23 +9313,22 @@ goog.Uri.QueryData.prototype.getValues = function(opt_key) {
  *
  * @param {string} key Name.
  * @param {*} value Value.
- * @return {goog.Uri.QueryData} Instance of this object.
+ * @return {!goog.Uri.QueryData} Instance of this object.
  */
 goog.Uri.QueryData.prototype.set = function(key, value) {
   this.ensureKeyMapInitialized_();
   this.invalidateCache_();
 
+  // TODO(user): This could be better written as
+  // this.remove(key), this.add(key, value), but that would reorder
+  // the key (since the key is first removed and then added at the
+  // end) and we would have to fix unit tests that depend on key
+  // ordering.
   key = this.getKeyName_(key);
   if (this.containsKey(key)) {
-    var old = this.keyMap_.get(key);
-    if (goog.isArray(old)) {
-      this.count_ -= old.length;
-    } else {
-      this.count_--;
-    }
+    this.count_ -= this.keyMap_.get(key).length;
   }
-
-  this.keyMap_.set(key, value);
+  this.keyMap_.set(key, [value]);
   this.count_++;
   return this;
 };
@@ -8651,46 +9340,31 @@ goog.Uri.QueryData.prototype.set = function(key, value) {
  * @param {string} key The name of the parameter to get the value for.
  * @param {*=} opt_default The default value to return if the query data
  *     has no such key.
- * @return {*} The first value associated with the key.
+ * @return {*} The first string value associated with the key, or opt_default
+ *     if there's no value.
  */
 goog.Uri.QueryData.prototype.get = function(key, opt_default) {
-  this.ensureKeyMapInitialized_();
-  key = this.getKeyName_(key);
-  if (this.containsKey(key)) {
-    var val = this.keyMap_.get(key);
-    if (goog.isArray(val)) {
-      return val[0];
-    } else {
-      return val;
-    }
+  var values = key ? this.getValues(key) : [];
+  if (goog.Uri.preserveParameterTypesCompatibilityFlag) {
+    return values.length > 0 ? values[0] : opt_default;
   } else {
-    return opt_default;
+    return values.length > 0 ? String(values[0]) : opt_default;
   }
 };
 
 
 /**
- * Sets the values for a key, if the key has already got values defined, this
- * will override the existing values then remove any left over
+ * Sets the values for a key. If the key already exists, this will
+ * override all of the existing values that correspond to the key.
  * @param {string} key The key to set values for.
  * @param {Array} values The values to set.
  */
 goog.Uri.QueryData.prototype.setValues = function(key, values) {
-  this.ensureKeyMapInitialized_();
-  this.invalidateCache_();
-
-  key = this.getKeyName_(key);
-  if (this.containsKey(key)) {
-    var old = this.keyMap_.get(key);
-    if (goog.isArray(old)) {
-      this.count_ -= old.length;
-    } else {
-      this.count_--;
-    }
-  }
+  this.remove(key);
 
   if (values.length > 0) {
-    this.keyMap_.set(key, values);
+    this.invalidateCache_();
+    this.keyMap_.set(this.getKeyName_(key), goog.array.clone(values));
     this.count_ += values.length;
   }
 };
@@ -8698,6 +9372,7 @@ goog.Uri.QueryData.prototype.setValues = function(key, values) {
 
 /**
  * @return {string} Encoded query string.
+ * @override
  */
 goog.Uri.QueryData.prototype.toString = function() {
   if (this.encodedQuery_) {
@@ -8710,42 +9385,26 @@ goog.Uri.QueryData.prototype.toString = function() {
 
   var sb = [];
 
-  // this used to use this.getKeys and this.getVals but that generates a lot
-  // allocations than just iterating over the keys
-  var count = 0;
+  // In the past, we use this.getKeys() and this.getVals(), but that
+  // generates a lot of allocations as compared to simply iterating
+  // over the keys.
   var keys = this.keyMap_.getKeys();
   for (var i = 0; i < keys.length; i++) {
     var key = keys[i];
     var encodedKey = goog.string.urlEncode(key);
-    var val = this.keyMap_.get(key);
-    if (goog.isArray(val)) {
-      for (var j = 0; j < val.length; j++) {
-        if (count > 0) {
-          sb.push('&');
-        }
-        sb.push(encodedKey);
-        // Check for empty string, null and undefined get encoded
-        // into the url as literal strings
-        if (val[j] !== '') {
-          sb.push('=', goog.string.urlEncode(val[j]));
-        }
-        count++;
+    var val = this.getValues(key);
+    for (var j = 0; j < val.length; j++) {
+      var param = encodedKey;
+      // Ensure that null and undefined are encoded into the url as
+      // literal strings.
+      if (val[j] !== '') {
+        param += '=' + goog.string.urlEncode(val[j]);
       }
-    } else {
-      if (count > 0) {
-        sb.push('&');
-      }
-      sb.push(encodedKey);
-      // Check for empty string, null and undefined get encoded
-      // into the url as literal strings
-      if (val !== '') {
-        sb.push('=', goog.string.urlEncode(val));
-      }
-      count++;
+      sb.push(param);
     }
   }
 
-  return this.encodedQuery_ = sb.join('');
+  return this.encodedQuery_ = sb.join('&');
 };
 
 
@@ -8753,11 +9412,7 @@ goog.Uri.QueryData.prototype.toString = function() {
  * @return {string} Decoded query string.
  */
 goog.Uri.QueryData.prototype.toDecodedString = function() {
-  if (!this.decodedQuery_) {
-    this.decodedQuery_ = goog.Uri.decodeOrEmpty_(this.toString());
-  }
-
-  return this.decodedQuery_;
+  return goog.Uri.decodeOrEmpty_(this.toString());
 };
 
 
@@ -8766,18 +9421,14 @@ goog.Uri.QueryData.prototype.toDecodedString = function() {
  * @private
  */
 goog.Uri.QueryData.prototype.invalidateCache_ = function() {
-  delete this.decodedQuery_;
-  delete this.encodedQuery_;
-  if (this.uri_) {
-    delete this.uri_.cachedToString_;
-  }
+  this.encodedQuery_ = null;
 };
 
 
 /**
  * Removes all keys that are not in the provided list. (Modifies this object.)
  * @param {Array.<string>} keys The desired keys.
- * @return {goog.Uri.QueryData} a reference to this object.
+ * @return {!goog.Uri.QueryData} a reference to this object.
  */
 goog.Uri.QueryData.prototype.filterKeys = function(keys) {
   this.ensureKeyMapInitialized_();
@@ -8794,16 +9445,11 @@ goog.Uri.QueryData.prototype.filterKeys = function(keys) {
 
 /**
  * Clone the query data instance.
- * @return {goog.Uri.QueryData} New instance of the QueryData object.
+ * @return {!goog.Uri.QueryData} New instance of the QueryData object.
  */
 goog.Uri.QueryData.prototype.clone = function() {
   var rv = new goog.Uri.QueryData();
-  if (this.decodedQuery_) {
-    rv.decodedQuery_ = this.decodedQuery_;
-  }
-  if (this.encodedQuery_) {
-    rv.encodedQuery_ = this.encodedQuery_;
-  }
+  rv.encodedQuery_ = this.encodedQuery_;
   if (this.keyMap_) {
     rv.keyMap_ = this.keyMap_.clone();
   }
@@ -8840,11 +9486,11 @@ goog.Uri.QueryData.prototype.setIgnoreCase = function(ignoreCase) {
     this.invalidateCache_();
     goog.structs.forEach(this.keyMap_,
         /** @this {goog.Uri.QueryData} */
-        function(value, key, map) {
+        function(value, key) {
           var lowerCase = key.toLowerCase();
           if (key != lowerCase) {
             this.remove(key);
-            this.add(lowerCase, value);
+            this.setValues(lowerCase, value);
           }
         }, this);
   }
@@ -8907,7 +9553,7 @@ goog.debug.errorHandlerWeakDep = {
    */
   protectEntryPoint: function(fn, opt_tracers) { return fn; }
 };
-// Copyright 2006 The Closure Library Authors. All Rights Reserved.
+// Copyright 2005 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -8922,454 +9568,242 @@ goog.debug.errorHandlerWeakDep = {
 // limitations under the License.
 
 /**
- * @fileoverview Rendering engine detection.
- * @see <a href="http://www.useragentstring.com/">User agent strings</a>
- * For information on the browser brand (such as Safari versus Chrome), see
- * goog.userAgent.product.
- * @see ../demos/useragent.html
+ * @fileoverview Listener object.
+ * @see ../demos/events.html
  */
-
-goog.provide('goog.userAgent');
-
-goog.require('goog.string');
 
 
 /**
- * @define {boolean} Whether we know at compile-time that the browser is IE.
+ * Namespace for events
  */
-goog.userAgent.ASSUME_IE = false;
+goog.provide('goog.events.Listener');
+
 
 
 /**
- * @define {boolean} Whether we know at compile-time that the browser is GECKO.
+ * Simple class that stores information about a listener
+ * @constructor
  */
-goog.userAgent.ASSUME_GECKO = false;
-
-
-/**
- * @define {boolean} Whether we know at compile-time that the browser is WEBKIT.
- */
-goog.userAgent.ASSUME_WEBKIT = false;
-
-
-/**
- * @define {boolean} Whether we know at compile-time that the browser is a
- *     mobile device running WebKit e.g. iPhone or Android.
- */
-goog.userAgent.ASSUME_MOBILE_WEBKIT = false;
-
-
-/**
- * @define {boolean} Whether we know at compile-time that the browser is OPERA.
- */
-goog.userAgent.ASSUME_OPERA = false;
-
-
-/**
- * Whether we know the browser engine at compile-time.
- * @type {boolean}
- * @private
- */
-goog.userAgent.BROWSER_KNOWN_ =
-    goog.userAgent.ASSUME_IE ||
-    goog.userAgent.ASSUME_GECKO ||
-    goog.userAgent.ASSUME_MOBILE_WEBKIT ||
-    goog.userAgent.ASSUME_WEBKIT ||
-    goog.userAgent.ASSUME_OPERA;
-
-
-/**
- * Returns the userAgent string for the current browser.
- * Some user agents (I'm thinking of you, Gears WorkerPool) do not expose a
- * navigator object off the global scope.  In that case we return null.
- *
- * @return {?string} The userAgent string or null if there is none.
- */
-goog.userAgent.getUserAgentString = function() {
-  return goog.global['navigator'] ? goog.global['navigator'].userAgent : null;
-};
-
-
-/**
- * @return {Object} The native navigator object.
- */
-goog.userAgent.getNavigator = function() {
-  // Need a local navigator reference instead of using the global one,
-  // to avoid the rare case where they reference different objects.
-  // (goog.gears.FakeWorkerPool, for example).
-  return goog.global['navigator'];
-};
-
-
-/**
- * Initializer for goog.userAgent.
- *
- * This is a named function so that it can be stripped via the jscompiler
- * option for stripping types.
- * @private
- */
-goog.userAgent.init_ = function() {
-  /**
-   * Whether the user agent string denotes Opera.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedOpera_ = false;
-
-  /**
-   * Whether the user agent string denotes Internet Explorer. This includes
-   * other browsers using Trident as its rendering engine. For example AOL
-   * and Netscape 8
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedIe_ = false;
-
-  /**
-   * Whether the user agent string denotes WebKit. WebKit is the rendering
-   * engine that Safari, Android and others use.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedWebkit_ = false;
-
-  /**
-   * Whether the user agent string denotes a mobile device.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedMobile_ = false;
-
-  /**
-   * Whether the user agent string denotes Gecko. Gecko is the rendering
-   * engine used by Mozilla, Mozilla Firefox, Camino and many more.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedGecko_ = false;
-
-  var ua;
-  if (!goog.userAgent.BROWSER_KNOWN_ &&
-      (ua = goog.userAgent.getUserAgentString())) {
-    var navigator = goog.userAgent.getNavigator();
-    goog.userAgent.detectedOpera_ = ua.indexOf('Opera') == 0;
-    goog.userAgent.detectedIe_ = !goog.userAgent.detectedOpera_ &&
-        ua.indexOf('MSIE') != -1;
-    goog.userAgent.detectedWebkit_ = !goog.userAgent.detectedOpera_ &&
-        ua.indexOf('WebKit') != -1;
-    // WebKit also gives navigator.product string equal to 'Gecko'.
-    goog.userAgent.detectedMobile_ = goog.userAgent.detectedWebkit_ &&
-        ua.indexOf('Mobile') != -1;
-    goog.userAgent.detectedGecko_ = !goog.userAgent.detectedOpera_ &&
-        !goog.userAgent.detectedWebkit_ && navigator.product == 'Gecko';
+goog.events.Listener = function() {
+  if (goog.events.Listener.ENABLE_MONITORING) {
+    this.creationStack = new Error().stack;
   }
 };
 
 
-if (!goog.userAgent.BROWSER_KNOWN_) {
-  goog.userAgent.init_();
-}
-
-
 /**
- * Whether the user agent is Opera.
- * @type {boolean}
- */
-goog.userAgent.OPERA = goog.userAgent.BROWSER_KNOWN_ ?
-    goog.userAgent.ASSUME_OPERA : goog.userAgent.detectedOpera_;
-
-
-/**
- * Whether the user agent is Internet Explorer. This includes other browsers
- * using Trident as its rendering engine. For example AOL and Netscape 8
- * @type {boolean}
- */
-goog.userAgent.IE = goog.userAgent.BROWSER_KNOWN_ ?
-    goog.userAgent.ASSUME_IE : goog.userAgent.detectedIe_;
-
-
-/**
- * Whether the user agent is Gecko. Gecko is the rendering engine used by
- * Mozilla, Mozilla Firefox, Camino and many more.
- * @type {boolean}
- */
-goog.userAgent.GECKO = goog.userAgent.BROWSER_KNOWN_ ?
-    goog.userAgent.ASSUME_GECKO :
-    goog.userAgent.detectedGecko_;
-
-
-/**
- * Whether the user agent is WebKit. WebKit is the rendering engine that
- * Safari, Android and others use.
- * @type {boolean}
- */
-goog.userAgent.WEBKIT = goog.userAgent.BROWSER_KNOWN_ ?
-    goog.userAgent.ASSUME_WEBKIT || goog.userAgent.ASSUME_MOBILE_WEBKIT :
-    goog.userAgent.detectedWebkit_;
-
-
-/**
- * Whether the user agent is running on a mobile device.
- * @type {boolean}
- */
-goog.userAgent.MOBILE = goog.userAgent.ASSUME_MOBILE_WEBKIT ||
-                        goog.userAgent.detectedMobile_;
-
-
-/**
- * Used while transitioning code to use WEBKIT instead.
- * @type {boolean}
- * @deprecated Use {@link goog.userAgent.product.SAFARI} instead.
- * TODO(nicksantos): Delete this from goog.userAgent.
- */
-goog.userAgent.SAFARI = goog.userAgent.WEBKIT;
-
-
-/**
- * @return {string} the platform (operating system) the user agent is running
- *     on. Default to empty string because navigator.platform may not be defined
- *     (on Rhino, for example).
+ * Counter used to create a unique key
+ * @type {number}
  * @private
  */
-goog.userAgent.determinePlatform_ = function() {
-  var navigator = goog.userAgent.getNavigator();
-  return navigator && navigator.platform || '';
-};
+goog.events.Listener.counter_ = 0;
 
 
 /**
- * The platform (operating system) the user agent is running on. Default to
- * empty string because navigator.platform may not be defined (on Rhino, for
- * example).
+ * @define {boolean} Whether to enable the monitoring of the
+ *     goog.events.Listener instances. Switching on the monitoring is only
+ *     recommended for debugging because it has a significant impact on
+ *     performance and memory usage. If switched off, the monitoring code
+ *     compiles down to 0 bytes.
+ */
+goog.events.Listener.ENABLE_MONITORING = false;
+
+
+/**
+ * Whether the listener is a function or an object that implements handleEvent.
+ * @type {boolean}
+ * @private
+ */
+goog.events.Listener.prototype.isFunctionListener_;
+
+
+/**
+ * Call back function or an object with a handleEvent function.
+ * @type {Function|Object|null}
+ */
+goog.events.Listener.prototype.listener;
+
+
+/**
+ * Proxy for callback that passes through {@link goog.events#HandleEvent_}
+ * @type {Function}
+ */
+goog.events.Listener.prototype.proxy;
+
+
+/**
+ * Object or node that callback is listening to
+ * @type {Object|goog.events.EventTarget}
+ */
+goog.events.Listener.prototype.src;
+
+
+/**
+ * Type of event
  * @type {string}
  */
-goog.userAgent.PLATFORM = goog.userAgent.determinePlatform_();
+goog.events.Listener.prototype.type;
 
 
 /**
- * @define {boolean} Whether the user agent is running on a Macintosh operating
- *     system.
- */
-goog.userAgent.ASSUME_MAC = false;
-
-
-/**
- * @define {boolean} Whether the user agent is running on a Windows operating
- *     system.
- */
-goog.userAgent.ASSUME_WINDOWS = false;
-
-
-/**
- * @define {boolean} Whether the user agent is running on a Linux operating
- *     system.
- */
-goog.userAgent.ASSUME_LINUX = false;
-
-
-/**
- * @define {boolean} Whether the user agent is running on a X11 windowing
- *     system.
- */
-goog.userAgent.ASSUME_X11 = false;
-
-
-/**
- * @type {boolean}
- * @private
- */
-goog.userAgent.PLATFORM_KNOWN_ =
-    goog.userAgent.ASSUME_MAC ||
-    goog.userAgent.ASSUME_WINDOWS ||
-    goog.userAgent.ASSUME_LINUX ||
-    goog.userAgent.ASSUME_X11;
-
-
-/**
- * Initialize the goog.userAgent constants that define which platform the user
- * agent is running on.
- * @private
- */
-goog.userAgent.initPlatform_ = function() {
-  /**
-   * Whether the user agent is running on a Macintosh operating system.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedMac_ = goog.string.contains(goog.userAgent.PLATFORM,
-      'Mac');
-
-  /**
-   * Whether the user agent is running on a Windows operating system.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedWindows_ = goog.string.contains(
-      goog.userAgent.PLATFORM, 'Win');
-
-  /**
-   * Whether the user agent is running on a Linux operating system.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedLinux_ = goog.string.contains(goog.userAgent.PLATFORM,
-      'Linux');
-
-  /**
-   * Whether the user agent is running on a X11 windowing system.
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.detectedX11_ = !!goog.userAgent.getNavigator() &&
-      goog.string.contains(goog.userAgent.getNavigator()['appVersion'] || '',
-          'X11');
-};
-
-
-if (!goog.userAgent.PLATFORM_KNOWN_) {
-  goog.userAgent.initPlatform_();
-}
-
-
-/**
- * Whether the user agent is running on a Macintosh operating system.
+ * Whether the listener is being called in the capture or bubble phase
  * @type {boolean}
  */
-goog.userAgent.MAC = goog.userAgent.PLATFORM_KNOWN_ ?
-    goog.userAgent.ASSUME_MAC : goog.userAgent.detectedMac_;
+goog.events.Listener.prototype.capture;
 
 
 /**
- * Whether the user agent is running on a Windows operating system.
+ * Optional object whose context to execute the listener in
+ * @type {Object|undefined}
+ */
+goog.events.Listener.prototype.handler;
+
+
+/**
+ * The key of the listener.
+ * @type {number}
+ */
+goog.events.Listener.prototype.key = 0;
+
+
+/**
+ * Whether the listener has been removed.
  * @type {boolean}
  */
-goog.userAgent.WINDOWS = goog.userAgent.PLATFORM_KNOWN_ ?
-    goog.userAgent.ASSUME_WINDOWS : goog.userAgent.detectedWindows_;
+goog.events.Listener.prototype.removed = false;
 
 
 /**
- * Whether the user agent is running on a Linux operating system.
+ * Whether to remove the listener after it has been called.
  * @type {boolean}
  */
-goog.userAgent.LINUX = goog.userAgent.PLATFORM_KNOWN_ ?
-    goog.userAgent.ASSUME_LINUX : goog.userAgent.detectedLinux_;
+goog.events.Listener.prototype.callOnce = false;
 
 
 /**
- * Whether the user agent is running on a X11 windowing system.
- * @type {boolean}
+ * If monitoring the goog.events.Listener instances is enabled, stores the
+ * creation stack trace of the Disposable instance.
+ * @type {string}
  */
-goog.userAgent.X11 = goog.userAgent.PLATFORM_KNOWN_ ?
-    goog.userAgent.ASSUME_X11 : goog.userAgent.detectedX11_;
+goog.events.Listener.prototype.creationStack;
 
 
 /**
- * @return {string} The string that describes the version number of the user
- *     agent.
- * @private
+ * Initializes the listener.
+ * @param {Function|Object} listener Callback function, or an object with a
+ *     handleEvent function.
+ * @param {Function} proxy Wrapper for the listener that patches the event.
+ * @param {Object} src Source object for the event.
+ * @param {string} type Event type.
+ * @param {boolean} capture Whether in capture or bubble phase.
+ * @param {Object=} opt_handler Object in whose context to execute the callback.
  */
-goog.userAgent.determineVersion_ = function() {
-  // All browsers have different ways to detect the version and they all have
-  // different naming schemes.
-
-  // version is a string rather than a number because it may contain 'b', 'a',
-  // and so on.
-  var version = '', re;
-
-  if (goog.userAgent.OPERA && goog.global['opera']) {
-    var operaVersion = goog.global['opera'].version;
-    version = typeof operaVersion == 'function' ? operaVersion() : operaVersion;
+goog.events.Listener.prototype.init = function(listener, proxy, src, type,
+                                               capture, opt_handler) {
+  // we do the test of the listener here so that we do  not need to
+  // continiously do this inside handleEvent
+  if (goog.isFunction(listener)) {
+    this.isFunctionListener_ = true;
+  } else if (listener && listener.handleEvent &&
+      goog.isFunction(listener.handleEvent)) {
+    this.isFunctionListener_ = false;
   } else {
-    if (goog.userAgent.GECKO) {
-      re = /rv\:([^\);]+)(\)|;)/;
-    } else if (goog.userAgent.IE) {
-      re = /MSIE\s+([^\);]+)(\)|;)/;
-    } else if (goog.userAgent.WEBKIT) {
-      // WebKit/125.4
-      re = /WebKit\/(\S+)/;
-    }
-    if (re) {
-      var arr = re.exec(goog.userAgent.getUserAgentString());
-      version = arr ? arr[1] : '';
-    }
+    throw Error('Invalid listener argument');
   }
-  if (goog.userAgent.IE) {
-    // IE9 can be in document mode 9 but be reporting an inconsistent user agent
-    // version.  If it is identifying as a version lower than 9 we take the
-    // documentMode as the version instead.  IE8 has similar behavior.
-    // It is recommended to set the X-UA-Compatible header to ensure that IE9
-    // uses documentMode 9.
-    var docMode = goog.userAgent.getDocumentMode_();
-    if (docMode > parseFloat(version)) {
-      return String(docMode);
-    }
+
+  this.listener = listener;
+  this.proxy = proxy;
+  this.src = src;
+  this.type = type;
+  this.capture = !!capture;
+  this.handler = opt_handler;
+  this.callOnce = false;
+  this.key = ++goog.events.Listener.counter_;
+  this.removed = false;
+};
+
+
+/**
+ * Calls the internal listener
+ * @param {Object} eventObject Event object to be passed to listener.
+ * @return {boolean} The result of the internal listener call.
+ */
+goog.events.Listener.prototype.handleEvent = function(eventObject) {
+  if (this.isFunctionListener_) {
+    return this.listener.call(this.handler || this.src, eventObject);
   }
-  return version;
+  return this.listener.handleEvent.call(this.listener, eventObject);
 };
-
-
-/**
- * @return {number|undefined} Returns the document mode (for testing).
- * @private
- */
-goog.userAgent.getDocumentMode_ = function() {
-  // NOTE(user): goog.userAgent may be used in context where there is no DOM.
-  var doc = goog.global['document'];
-  return doc ? doc['documentMode'] : undefined;
-};
-
-
-/**
- * The version of the user agent. This is a string because it might contain
- * 'b' (as in beta) as well as multiple dots.
- * @type {string}
- */
-goog.userAgent.VERSION = goog.userAgent.determineVersion_();
-
+// Copyright 2010 The Closure Library Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS-IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 /**
- * Compares two version numbers.
+ * @fileoverview Browser capability checks for the events package.
  *
- * @param {string} v1 Version of first item.
- * @param {string} v2 Version of second item.
- *
- * @return {number}  1 if first argument is higher
- *                   0 if arguments are equal
- *                  -1 if second argument is higher.
- * @deprecated Use goog.string.compareVersions.
  */
-goog.userAgent.compare = function(v1, v2) {
-  return goog.string.compareVersions(v1, v2);
-};
+
+
+goog.provide('goog.events.BrowserFeature');
+
+goog.require('goog.userAgent');
 
 
 /**
- * Cache for {@link goog.userAgent.isVersion}. Calls to compareVersions are
- * surprisingly expensive and as a browsers version number is unlikely to change
- * during a session we cache the results.
- * @type {Object}
- * @private
+ * Enum of browser capabilities.
+ * @enum {boolean}
  */
-goog.userAgent.isVersionCache_ = {};
+goog.events.BrowserFeature = {
+  /**
+   * Whether the button attribute of the event is W3C compliant.  False in
+   * Internet Explorer prior to version 9; document-version dependent.
+   */
+  HAS_W3C_BUTTON: !goog.userAgent.IE || goog.userAgent.isDocumentMode(9),
 
+  /**
+   * Whether the browser supports full W3C event model.
+   */
+  HAS_W3C_EVENT_SUPPORT: !goog.userAgent.IE || goog.userAgent.isDocumentMode(9),
 
-/**
- * Whether the user agent version is higher or the same as the given version.
- * NOTE: When checking the version numbers for Firefox and Safari, be sure to
- * use the engine's version, not the browser's version number.  For example,
- * Firefox 3.0 corresponds to Gecko 1.9 and Safari 3.0 to Webkit 522.11.
- * Opera and Internet Explorer versions match the product release number.<br>
- * @see <a href="http://en.wikipedia.org/wiki/Safari_(web_browser)">Webkit</a>
- * @see <a href="http://en.wikipedia.org/wiki/Gecko_engine">Gecko</a>
- *
- * @param {string|number} version The version to check.
- * @return {boolean} Whether the user agent version is higher or the same as
- *     the given version.
- */
-goog.userAgent.isVersion = function(version) {
-  return goog.userAgent.isVersionCache_[version] ||
-      (goog.userAgent.isVersionCache_[version] =
-          goog.string.compareVersions(goog.userAgent.VERSION, version) >= 0);
+  /**
+   * To prevent default in IE7 for certain keydown events we need set the
+   * keyCode to -1.
+   */
+  SET_KEY_CODE_TO_PREVENT_DEFAULT: goog.userAgent.IE &&
+      !goog.userAgent.isVersion('8'),
+
+  /**
+   * Whether the {@code navigator.onLine} property is supported.
+   */
+  HAS_NAVIGATOR_ONLINE_PROPERTY: !goog.userAgent.WEBKIT ||
+      goog.userAgent.isVersion('528'),
+
+  /**
+   * Whether HTML5 network online/offline events are supported.
+   */
+  HAS_HTML5_NETWORK_EVENT_SUPPORT:
+      goog.userAgent.GECKO && goog.userAgent.isVersion('1.9b') ||
+      goog.userAgent.IE && goog.userAgent.isVersion('8') ||
+      goog.userAgent.OPERA && goog.userAgent.isVersion('9.5') ||
+      goog.userAgent.WEBKIT && goog.userAgent.isVersion('528'),
+
+  /**
+   * Whether HTML5 network events fire on document.body, or otherwise the
+   * window.
+   */
+  HTML5_NETWORK_EVENTS_FIRE_ON_BODY:
+      goog.userAgent.GECKO && !goog.userAgent.isVersion('8') ||
+      goog.userAgent.IE && !goog.userAgent.isVersion('9')
 };
 // Copyright 2010 The Closure Library Authors. All Rights Reserved.
 //
@@ -9391,11 +9825,17 @@ goog.userAgent.isVersion = function(version) {
  * entry points with this registry. Designed to be compiled out
  * if no instrumentation is requested.
  *
+ * Entry points may be registered before or after a call to
+ * goog.debug.entryPointRegistry.monitorAll. If an entry point is registered
+ * later, the existing monitor will instrument the new entry point.
+ *
  * @author nicksantos@google.com (Nick Santos)
  */
 
 goog.provide('goog.debug.EntryPointMonitor');
 goog.provide('goog.debug.entryPointRegistry');
+
+goog.require('goog.asserts');
 
 
 
@@ -9407,6 +9847,7 @@ goog.debug.EntryPointMonitor = function() {};
 
 /**
  * Instruments a function.
+ *
  * @param {!Function} fn A function to instrument.
  * @return {!Function} The instrumented function.
  */
@@ -9441,46 +9882,86 @@ goog.debug.entryPointRegistry.refList_ = [];
 
 
 /**
+ * Monitors that should wrap all the entry points.
+ * @type {!Array.<!goog.debug.EntryPointMonitor>}
+ * @private
+ */
+goog.debug.entryPointRegistry.monitors_ = [];
+
+
+/**
+ * Whether goog.debug.entryPointRegistry.monitorAll has ever been called.
+ * Checking this allows the compiler to optimize out the registrations.
+ * @type {boolean}
+ * @private
+ */
+goog.debug.entryPointRegistry.monitorsMayExist_ = false;
+
+
+/**
  * Register an entry point with this module.
- * @param {function(!Function)} callback A callback function.
- *     When a client requests instrumentation, this callback will be called
- *     with a trnasforming function. The callback is responsible for wrapping
- *     the relevant entry point with the transforming function.
+ *
+ * The entry point will be instrumented when a monitor is passed to
+ * goog.debug.entryPointRegistry.monitorAll. If this has already occurred, the
+ * entry point is instrumented immediately.
+ *
+ * @param {function(!Function)} callback A callback function which is called
+ *     with a transforming function to instrument the entry point. The callback
+ *     is responsible for wrapping the relevant entry point with the
+ *     transforming function.
  */
 goog.debug.entryPointRegistry.register = function(callback) {
   // Don't use push(), so that this can be compiled out.
   goog.debug.entryPointRegistry.refList_[
       goog.debug.entryPointRegistry.refList_.length] = callback;
+  // If no one calls monitorAll, this can be compiled out.
+  if (goog.debug.entryPointRegistry.monitorsMayExist_) {
+    var monitors = goog.debug.entryPointRegistry.monitors_;
+    for (var i = 0; i < monitors.length; i++) {
+      callback(goog.bind(monitors[i].wrap, monitors[i]));
+    }
+  }
 };
 
 
 /**
- * Monitor all registered entry points.
- * @param {goog.debug.EntryPointMonitor} monitor An entry point monitor.
+ * Configures a monitor to wrap all entry points.
+ *
+ * Entry points that have already been registered are immediately wrapped by
+ * the monitor. When an entry point is registered in the future, it will also
+ * be wrapped by the monitor when it is registered.
+ *
+ * @param {!goog.debug.EntryPointMonitor} monitor An entry point monitor.
  */
 goog.debug.entryPointRegistry.monitorAll = function(monitor) {
+  goog.debug.entryPointRegistry.monitorsMayExist_ = true;
   var transformer = goog.bind(monitor.wrap, monitor);
   for (var i = 0; i < goog.debug.entryPointRegistry.refList_.length; i++) {
     goog.debug.entryPointRegistry.refList_[i](transformer);
   }
+  goog.debug.entryPointRegistry.monitors_.push(monitor);
 };
 
 
 /**
- * Try to unmonitor all the registered entry points.
+ * Try to unmonitor all the entry points that have already been registered. If
+ * an entry point is registered in the future, it will not be wrapped by the
+ * monitor when it is registered. Note that this may fail if the entry points
+ * have additional wrapping.
  *
- * Note that this may fail if the entry points have additional wrapping.
- * See the comment on {@code EntryPointMonitor}'s {@code setInvertedMode}
- * method.
- *
- * @param {goog.debug.EntryPointMonitor} monitor The last monitor to wrap
+ * @param {!goog.debug.EntryPointMonitor} monitor The last monitor to wrap
  *     the entry points.
+ * @throws {Error} If the monitor is not the most recently configured monitor.
  */
 goog.debug.entryPointRegistry.unmonitorAllIfPossible = function(monitor) {
+  var monitors = goog.debug.entryPointRegistry.monitors_;
+  goog.asserts.assert(monitor == monitors[monitors.length - 1],
+      'Only the most recent monitor can be unwrapped.');
   var transformer = goog.bind(monitor.unwrap, monitor);
   for (var i = 0; i < goog.debug.entryPointRegistry.refList_.length; i++) {
     goog.debug.entryPointRegistry.refList_[i](transformer);
   }
+  monitors.length--;
 };
 // Copyright 2009 The Closure Library Authors. All Rights Reserved.
 //
@@ -9499,6 +9980,7 @@ goog.debug.entryPointRegistry.unmonitorAllIfPossible = function(monitor) {
 /**
  * @fileoverview Definition of the goog.events.EventWrapper interface.
  *
+ * @author eae@google.com (Emil A Eklund)
  */
 
 goog.provide('goog.events.EventWrapper');
@@ -9566,6 +10048,8 @@ goog.events.EventWrapper.prototype.unlisten = function(src, listener, opt_capt,
 /**
  * @fileoverview Event Types.
  *
+ * @author arv@google.com (Erik Arvidsson)
+ * @author mirkov@google.com (Mirko Visontai)
  */
 
 
@@ -9648,56 +10132,29 @@ goog.events.EventType = {
   POPSTATE: 'popstate',
 
   // Copy and Paste
+  // Support is limited. Make sure it works on your favorite browser
+  // before using.
+  // http://www.quirksmode.org/dom/events/cutcopypaste.html
   COPY: 'copy',
   PASTE: 'paste',
   CUT: 'cut',
+  BEFORECOPY: 'beforecopy',
+  BEFORECUT: 'beforecut',
+  BEFOREPASTE: 'beforepaste',
+
+  // HTML5 online/offline events.
+  // http://www.w3.org/TR/offline-webapps/#related
+  ONLINE: 'online',
+  OFFLINE: 'offline',
 
   // HTML 5 worker events
   MESSAGE: 'message',
-  CONNECT: 'connect'
-};
-// Copyright 2010 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+  CONNECT: 'connect',
 
-/**
- * @fileoverview Browser capability checks for the events package.
- *
- */
-
-
-goog.provide('goog.events.BrowserFeature');
-
-goog.require('goog.userAgent');
-
-
-/**
- * Enum of browser capabilities.
- * @enum {boolean}
- */
-goog.events.BrowserFeature = {
-  /**
-   * Whether the button attribute of the event is W3C compliant.
-   * False in Internet Explorer prior to version 9.
-   */
-  HAS_W3C_BUTTON: !goog.userAgent.IE || goog.userAgent.isVersion('9'),
-
-  /**
-   * To prevent default in IE7 for certain keydown events we need set the
-   * keyCode to -1.
-   */
-  SET_KEY_CODE_TO_PREVENT_DEFAULT: goog.userAgent.IE &&
-      !goog.userAgent.isVersion('8')
+  // CSS transition events. Based on the browser support described at:
+  // https://developer.mozilla.org/en/css/css_transitions#Browser_compatibility
+  TRANSITIONEND: goog.userAgent.WEBKIT ? 'webkitTransitionEnd' :
+      (goog.userAgent.OPERA ? 'oTransitionEnd' : 'transitionend')
 };
 // Copyright 2011 The Closure Library Authors. All Rights Reserved.
 //
@@ -9716,6 +10173,7 @@ goog.events.BrowserFeature = {
 /**
  * @fileoverview Definition of the disposable interface.  A disposable object
  * has a dispose method to to clean up references and resources.
+ * @author nnaze@google.com (Nathan Naze)
  */
 
 
@@ -9760,6 +10218,7 @@ goog.disposable.IDisposable.prototype.isDisposed;
 /**
  * @fileoverview Implements the disposable interface. The dispose method is used
  * to clean up references and resources.
+ * @author arv@google.com (Erik Arvidsson)
  */
 
 
@@ -9780,6 +10239,7 @@ goog.require('goog.disposable.IDisposable');
  */
 goog.Disposable = function() {
   if (goog.Disposable.ENABLE_MONITORING) {
+    this.creationStack = new Error().stack;
     goog.Disposable.instances_[goog.getUid(this)] = this;
   }
 };
@@ -9837,7 +10297,32 @@ goog.Disposable.prototype.disposed_ = false;
 
 
 /**
+ * Disposables that should be disposed when this object is disposed.
+ * @type {Array.<goog.disposable.IDisposable>}
+ * @private
+ */
+goog.Disposable.prototype.dependentDisposables_;
+
+
+/**
+ * Callbacks to invoke when this object is disposed.
+ * @type {Array.<!Function>}
+ * @private
+ */
+goog.Disposable.prototype.onDisposeCallbacks_;
+
+
+/**
+ * If monitoring the goog.Disposable instances is enabled, stores the creation
+ * stack trace of the Disposable instance.
+ * @type {string}
+ */
+goog.Disposable.prototype.creationStack;
+
+
+/**
  * @return {boolean} Whether the object has been disposed of.
+ * @override
  */
 goog.Disposable.prototype.isDisposed = function() {
   return this.disposed_;
@@ -9855,9 +10340,10 @@ goog.Disposable.prototype.getDisposed = goog.Disposable.prototype.isDisposed;
  * Disposes of the object. If the object hasn't already been disposed of, calls
  * {@link #disposeInternal}. Classes that extend {@code goog.Disposable} should
  * override {@link #disposeInternal} in order to delete references to COM
- * objects, DOM nodes, and other disposable objects.
+ * objects, DOM nodes, and other disposable objects. Reentrant.
  *
  * @return {void} Nothing.
+ * @override
  */
 goog.Disposable.prototype.dispose = function() {
   if (!this.disposed_) {
@@ -9879,19 +10365,51 @@ goog.Disposable.prototype.dispose = function() {
 
 
 /**
+ * Associates a disposable object with this object so that they will be disposed
+ * together.
+ * @param {goog.disposable.IDisposable} disposable that will be disposed when
+ *     this object is disposed.
+ */
+goog.Disposable.prototype.registerDisposable = function(disposable) {
+  if (!this.dependentDisposables_) {
+    this.dependentDisposables_ = [];
+  }
+  this.dependentDisposables_.push(disposable);
+};
+
+
+/**
+ * Invokes a callback function when this object is disposed. Callbacks are
+ * invoked in the order in which they were added.
+ * @param {!Function} callback The callback function.
+ * @param {Object=} opt_scope An optional scope to call the callback in.
+ */
+goog.Disposable.prototype.addOnDisposeCallback = function(callback, opt_scope) {
+  if (!this.onDisposeCallbacks_) {
+    this.onDisposeCallbacks_ = [];
+  }
+  this.onDisposeCallbacks_.push(goog.bind(callback, opt_scope));
+};
+
+
+/**
  * Deletes or nulls out any references to COM objects, DOM nodes, or other
  * disposable objects. Classes that extend {@code goog.Disposable} should
- * override this method.  For example:
+ * override this method.
+ * Not reentrant. To avoid calling it twice, it must only be called from the
+ * subclass' {@code disposeInternal} method. Everywhere else the public
+ * {@code dispose} method must be used.
+ * For example:
  * <pre>
  *   mypackage.MyClass = function() {
- *     goog.Disposable.call(this);
+ *     goog.base(this);
  *     // Constructor logic specific to MyClass.
  *     ...
  *   };
  *   goog.inherits(mypackage.MyClass, goog.Disposable);
  *
  *   mypackage.MyClass.prototype.disposeInternal = function() {
- *     mypackage.MyClass.superClass_.disposeInternal.call(this);
+ *     goog.base(this, 'disposeInternal');
  *     // Dispose logic specific to MyClass.
  *     ...
  *   };
@@ -9899,7 +10417,14 @@ goog.Disposable.prototype.dispose = function() {
  * @protected
  */
 goog.Disposable.prototype.disposeInternal = function() {
-  // No-op in the base class.
+  if (this.dependentDisposables_) {
+    goog.disposeAll.apply(null, this.dependentDisposables_);
+  }
+  if (this.onDisposeCallbacks_) {
+    while (this.onDisposeCallbacks_.length) {
+      this.onDisposeCallbacks_.shift()();
+    }
+  }
 };
 
 
@@ -9911,6 +10436,25 @@ goog.Disposable.prototype.disposeInternal = function() {
 goog.dispose = function(obj) {
   if (obj && typeof obj.dispose == 'function') {
     obj.dispose();
+  }
+};
+
+
+/**
+ * Calls {@code dispose} on each member of the list that supports it. (If the
+ * member is an ArrayLike, then {@code goog.disposeAll()} will be called
+ * recursively on each of its members.) If the member is not an object with a
+ * {@code dispose()} method, then it is ignored.
+ * @param {...*} var_args The list.
+ */
+goog.disposeAll = function(var_args) {
+  for (var i = 0, len = arguments.length; i < len; ++i) {
+    var disposable = arguments[i];
+    if (goog.isArrayLike(disposable)) {
+      goog.disposeAll.apply(null, disposable);
+    } else {
+      goog.dispose(disposable);
+    }
   }
 };
 // Copyright 2005 The Closure Library Authors. All Rights Reserved.
@@ -9935,6 +10479,8 @@ goog.dispose = function(obj) {
 
 goog.provide('goog.events.Event');
 
+// goog.events.Event no longer depends on goog.Disposable. Keep requiring
+// goog.Disposable here to not break projects which assume this dependency.
 goog.require('goog.Disposable');
 
 
@@ -9948,11 +10494,8 @@ goog.require('goog.Disposable');
  *     this event. It has to implement the {@code EventTarget} interface
  *     declared at {@link http://developer.mozilla.org/en/DOM/EventTarget}.
  * @constructor
- * @extends {goog.Disposable}
  */
 goog.events.Event = function(type, opt_target) {
-  goog.Disposable.call(this);
-
   /**
    * Event type.
    * @type {string}
@@ -9971,14 +10514,21 @@ goog.events.Event = function(type, opt_target) {
    */
   this.currentTarget = this.target;
 };
-goog.inherits(goog.events.Event, goog.Disposable);
 
 
-/** @inheritDoc */
+/**
+ * For backwards compatibility (goog.events.Event used to inherit
+ * goog.Disposable).
+ */
 goog.events.Event.prototype.disposeInternal = function() {
-  delete this.type;
-  delete this.target;
-  delete this.currentTarget;
+};
+
+
+/**
+ * For backwards compatibility (goog.events.Event used to inherit
+ * goog.Disposable).
+ */
+goog.events.Event.prototype.dispose = function() {
 };
 
 
@@ -9989,6 +10539,16 @@ goog.events.Event.prototype.disposeInternal = function() {
  *     this package is strongly discouraged.
  */
 goog.events.Event.prototype.propagationStopped_ = false;
+
+
+/**
+ * Whether the default action has been prevented.
+ * This is a property to match the W3C specification at {@link
+ * http://www.w3.org/TR/DOM-Level-3-Events/#events-event-type-defaultPrevented}.
+ * Must be treated as read-only outside the class.
+ * @type {boolean}
+ */
+goog.events.Event.prototype.defaultPrevented = false;
 
 
 /**
@@ -10012,6 +10572,7 @@ goog.events.Event.prototype.stopPropagation = function() {
  * Prevents the default action, for example a link redirecting to a url.
  */
 goog.events.Event.prototype.preventDefault = function() {
+  this.defaultPrevented = true;
   this.returnValue_ = false;
 };
 
@@ -10077,15 +10638,42 @@ goog.reflect.object = function(type, object) {
 
 
 /**
- * To assert to the compiler that an operation is needed when it would other
- * wise be stripped. For example:
+ * To assert to the compiler that an operation is needed when it would
+ * otherwise be stripped. For example:
  * <code>
  *     // Force a layout
  *     goog.reflect.sinkValue(dialog.offsetHeight);
  * </code>
- * @type {Function}
+ * @type {!Function}
  */
-goog.reflect.sinkValue = new Function('a', 'return a');
+goog.reflect.sinkValue = function(x) {
+  goog.reflect.sinkValue[' '](x);
+  return x;
+};
+
+
+/**
+ * The compiler should optimize this function away iff no one ever uses
+ * goog.reflect.sinkValue.
+ */
+goog.reflect.sinkValue[' '] = goog.nullFunction;
+
+
+/**
+ * Check if a property can be accessed without throwing an exception.
+ * @param {Object} obj The owner of the property.
+ * @param {string} prop The property name.
+ * @return {boolean} Whether the property is accessible. Will also return true
+ *     if obj is null.
+ */
+goog.reflect.canAccessProperty = function(obj, prop) {
+  /** @preserveTry */
+  try {
+    goog.reflect.sinkValue(obj[prop]);
+    return true;
+  } catch (e) {}
+  return false;
+};
 // Copyright 2005 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -10122,6 +10710,7 @@ goog.reflect.sinkValue = new Function('a', 'return a');
  * - altKey         {boolean}   Was alt key depressed
  * - shiftKey       {boolean}   Was shift key depressed
  * - metaKey        {boolean}   Was meta key depressed
+ * - defaultPrevented {boolean} Whether the default action has been prevented
  * - state          {Object}    History state object
  *
  * NOTE: The keyCode member contains the raw browser keyCode. For normalized
@@ -10341,14 +10930,11 @@ goog.events.BrowserEvent.prototype.init = function(e, opt_currentTarget) {
     // denied exception. See:
     // https://bugzilla.mozilla.org/show_bug.cgi?id=497780
     if (goog.userAgent.GECKO) {
-      /** @preserveTry */
-      try {
-        goog.reflect.sinkValue(relatedTarget.nodeName);
-      } catch (err) {
+      if (!goog.reflect.canAccessProperty(relatedTarget, 'nodeName')) {
         relatedTarget = null;
       }
     }
-    // TODO(user): Use goog.events.EventType when it has been refactored into its
+    // TODO(arv): Use goog.events.EventType when it has been refactored into its
     // own file.
   } else if (type == goog.events.EventType.MOUSEOVER) {
     relatedTarget = e.fromElement;
@@ -10358,8 +10944,13 @@ goog.events.BrowserEvent.prototype.init = function(e, opt_currentTarget) {
 
   this.relatedTarget = relatedTarget;
 
-  this.offsetX = e.offsetX !== undefined ? e.offsetX : e.layerX;
-  this.offsetY = e.offsetY !== undefined ? e.offsetY : e.layerY;
+  // Webkit emits a lame warning whenever layerX/layerY is accessed.
+  // http://code.google.com/p/chromium/issues/detail?id=101733
+  this.offsetX = (goog.userAgent.WEBKIT || e.offsetX !== undefined) ?
+      e.offsetX : e.layerX;
+  this.offsetY = (goog.userAgent.WEBKIT || e.offsetY !== undefined) ?
+      e.offsetY : e.layerY;
+
   this.clientX = e.clientX !== undefined ? e.clientX : e.pageX;
   this.clientY = e.clientY !== undefined ? e.clientY : e.pageY;
   this.screenX = e.screenX || 0;
@@ -10376,7 +10967,9 @@ goog.events.BrowserEvent.prototype.init = function(e, opt_currentTarget) {
   this.platformModifierKey = goog.userAgent.MAC ? e.metaKey : e.ctrlKey;
   this.state = e.state;
   this.event_ = e;
-  delete this.returnValue_;
+  if (e.defaultPrevented) {
+    this.preventDefault();
+  }
   delete this.propagationStopped_;
 };
 
@@ -10428,7 +11021,7 @@ goog.events.BrowserEvent.prototype.isMouseActionButton = function() {
 
 
 /**
- * @inheritDoc
+ * @override
  */
 goog.events.BrowserEvent.prototype.stopPropagation = function() {
   goog.events.BrowserEvent.superClass_.stopPropagation.call(this);
@@ -10441,7 +11034,7 @@ goog.events.BrowserEvent.prototype.stopPropagation = function() {
 
 
 /**
- * @inheritDoc
+ * @override
  */
 goog.events.BrowserEvent.prototype.preventDefault = function() {
   goog.events.BrowserEvent.superClass_.preventDefault.call(this);
@@ -10488,822 +11081,9 @@ goog.events.BrowserEvent.prototype.getBrowserEvent = function() {
 };
 
 
-/**
- * @inheritDoc
- */
+/** @override */
 goog.events.BrowserEvent.prototype.disposeInternal = function() {
-  goog.events.BrowserEvent.superClass_.disposeInternal.call(this);
-  this.event_ = null;
-  this.target = null;
-  this.currentTarget = null;
-  this.relatedTarget = null;
 };
-// Copyright 2005 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/**
- * @fileoverview Listener object.
- * @see ../demos/events.html
- */
-
-
-/**
- * Namespace for events
- */
-goog.provide('goog.events.Listener');
-
-
-
-/**
- * Simple class that stores information about a listener
- * @constructor
- */
-goog.events.Listener = function() {
-};
-
-
-/**
- * Counter used to create a unique key
- * @type {number}
- * @private
- */
-goog.events.Listener.counter_ = 0;
-
-
-/**
- * Whether the listener is a function or an object that implements handleEvent.
- * @type {boolean}
- * @private
- */
-goog.events.Listener.prototype.isFunctionListener_;
-
-
-/**
- * Call back function or an object with a handleEvent function.
- * @type {Function|Object|null}
- */
-goog.events.Listener.prototype.listener;
-
-
-/**
- * Proxy for callback that passes through {@link goog.events#HandleEvent_}
- * @type {Function}
- */
-goog.events.Listener.prototype.proxy;
-
-
-/**
- * Object or node that callback is listening to
- * @type {Object|goog.events.EventTarget}
- */
-goog.events.Listener.prototype.src;
-
-
-/**
- * Type of event
- * @type {string}
- */
-goog.events.Listener.prototype.type;
-
-
-/**
- * Whether the listener is being called in the capture or bubble phase
- * @type {boolean}
- */
-goog.events.Listener.prototype.capture;
-
-
-/**
- * Optional object whose context to execute the listener in
- * @type {Object|undefined}
- */
-goog.events.Listener.prototype.handler;
-
-
-/**
- * The key of the listener.
- * @type {number}
- */
-goog.events.Listener.prototype.key = 0;
-
-
-/**
- * Whether the listener has been removed.
- * @type {boolean}
- */
-goog.events.Listener.prototype.removed = false;
-
-
-/**
- * Whether to remove the listener after it has been called.
- * @type {boolean}
- */
-goog.events.Listener.prototype.callOnce = false;
-
-
-/**
- * Initializes the listener.
- * @param {Function|Object} listener Callback function, or an object with a
- *     handleEvent function.
- * @param {Function} proxy Wrapper for the listener that patches the event.
- * @param {Object} src Source object for the event.
- * @param {string} type Event type.
- * @param {boolean} capture Whether in capture or bubble phase.
- * @param {Object=} opt_handler Object in whose context to execute the callback.
- */
-goog.events.Listener.prototype.init = function(listener, proxy, src, type,
-                                               capture, opt_handler) {
-  // we do the test of the listener here so that we do  not need to
-  // continiously do this inside handleEvent
-  if (goog.isFunction(listener)) {
-    this.isFunctionListener_ = true;
-  } else if (listener && listener.handleEvent &&
-      goog.isFunction(listener.handleEvent)) {
-    this.isFunctionListener_ = false;
-  } else {
-    throw Error('Invalid listener argument');
-  }
-
-  this.listener = listener;
-  this.proxy = proxy;
-  this.src = src;
-  this.type = type;
-  this.capture = !!capture;
-  this.handler = opt_handler;
-  this.callOnce = false;
-  this.key = ++goog.events.Listener.counter_;
-  this.removed = false;
-};
-
-
-/**
- * Calls the internal listener
- * @param {Object} eventObject Event object to be passed to listener.
- * @return {boolean} The result of the internal listener call.
- */
-goog.events.Listener.prototype.handleEvent = function(eventObject) {
-  if (this.isFunctionListener_) {
-    return this.listener.call(this.handler || this.src, eventObject);
-  }
-  return this.listener.handleEvent.call(this.listener, eventObject);
-};
-// Copyright 2007 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/**
- * @fileoverview Detection of JScript version.
- *
- */
-
-
-goog.provide('goog.userAgent.jscript');
-
-goog.require('goog.string');
-
-
-/**
- * @define {boolean} True if it is known at compile time that the runtime
- *     environment will not be using JScript.
- */
-goog.userAgent.jscript.ASSUME_NO_JSCRIPT = false;
-
-
-/**
- * Initializer for goog.userAgent.jscript.  Detects if the user agent is using
- * Microsoft JScript and which version of it.
- *
- * This is a named function so that it can be stripped via the jscompiler
- * option for stripping types.
- * @private
- */
-goog.userAgent.jscript.init_ = function() {
-  var hasScriptEngine = 'ScriptEngine' in goog.global;
-
-  /**
-   * @type {boolean}
-   * @private
-   */
-  goog.userAgent.jscript.DETECTED_HAS_JSCRIPT_ =
-      hasScriptEngine && goog.global['ScriptEngine']() == 'JScript';
-
-  /**
-   * @type {string}
-   * @private
-   */
-  goog.userAgent.jscript.DETECTED_VERSION_ =
-      goog.userAgent.jscript.DETECTED_HAS_JSCRIPT_ ?
-      (goog.global['ScriptEngineMajorVersion']() + '.' +
-       goog.global['ScriptEngineMinorVersion']() + '.' +
-       goog.global['ScriptEngineBuildVersion']()) :
-      '0';
-};
-
-if (!goog.userAgent.jscript.ASSUME_NO_JSCRIPT) {
-  goog.userAgent.jscript.init_();
-}
-
-
-/**
- * Whether we detect that the user agent is using Microsoft JScript.
- * @type {boolean}
- */
-goog.userAgent.jscript.HAS_JSCRIPT = goog.userAgent.jscript.ASSUME_NO_JSCRIPT ?
-    false : goog.userAgent.jscript.DETECTED_HAS_JSCRIPT_;
-
-
-/**
- * The installed version of JScript.
- * @type {string}
- */
-goog.userAgent.jscript.VERSION = goog.userAgent.jscript.ASSUME_NO_JSCRIPT ?
-    '0' : goog.userAgent.jscript.DETECTED_VERSION_;
-
-
-/**
- * Whether the installed version of JScript is as new or newer than a given
- * version.
- * @param {string} version The version to check.
- * @return {boolean} Whether the installed version of JScript is as new or
- *     newer than the given version.
- */
-goog.userAgent.jscript.isVersion = function(version) {
-  return goog.string.compareVersions(goog.userAgent.jscript.VERSION,
-                                     version) >= 0;
-};
-// Copyright 2007 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/**
- * @fileoverview Datastructure: Pool.
- *
- *
- * A generic class for handling pools of objects that is more efficient than
- * goog.structs.Pool because it doesn't maintain a list of objects that are in
- * use. See constructor comment.
- */
-
-
-goog.provide('goog.structs.SimplePool');
-
-goog.require('goog.Disposable');
-
-
-
-/**
- * A generic pool class. Simpler and more efficient than goog.structs.Pool
- * because it doesn't maintain a list of objects that are in use. This class
- * has constant overhead and doesn't create any additional objects as part of
- * the pool management after construction time.
- *
- * IMPORTANT: If the objects being pooled are arrays or maps that can have
- * unlimited number of properties, they need to be cleaned before being
- * returned to the pool.
- *
- * Also note that {@see goog.object.clean} actually allocates an array to clean
- * the object passed to it, so simply using this function would defy the
- * purpose of using the pool.
- *
- * @param {number} initialCount Initial number of objects to populate the
- *     free pool at construction time.
- * @param {number} maxCount Maximum number of objects to keep in the free pool.
- * @constructor
- * @extends {goog.Disposable}
- */
-goog.structs.SimplePool = function(initialCount, maxCount) {
-  goog.Disposable.call(this);
-
-  /**
-   * Maximum number of objects allowed
-   * @type {number}
-   * @private
-   */
-  this.maxCount_ = maxCount;
-
-  /**
-   * Queue used to store objects that are currently in the pool and available
-   * to be used.
-   * @type {Array}
-   * @private
-   */
-  this.freeQueue_ = [];
-
-  this.createInitial_(initialCount);
-};
-goog.inherits(goog.structs.SimplePool, goog.Disposable);
-
-
-/**
- * Function for overriding createObject. The avoids a common case requiring
- * subclassing this class.
- * @type {Function}
- * @private
- */
-goog.structs.SimplePool.prototype.createObjectFn_ = null;
-
-
-/**
- * Function for overriding disposeObject. The avoids a common case requiring
- * subclassing this class.
- * @type {Function}
- * @private
- */
-goog.structs.SimplePool.prototype.disposeObjectFn_ = null;
-
-
-/**
- * Sets the {@code createObject} function which is used for creating a new
- * object in the pool.
- * @param {Function} createObjectFn Create object function which returns the
- *     newly createrd object.
- */
-goog.structs.SimplePool.prototype.setCreateObjectFn = function(createObjectFn) {
-  this.createObjectFn_ = createObjectFn;
-};
-
-
-/**
- * Sets the {@code disposeObject} function which is used for disposing of an
- * object in the pool.
- * @param {Function} disposeObjectFn Dispose object function which takes the
- *     object to dispose as a parameter.
- */
-goog.structs.SimplePool.prototype.setDisposeObjectFn = function(
-    disposeObjectFn) {
-  this.disposeObjectFn_ = disposeObjectFn;
-};
-
-
-/**
- * Gets a new object from the the pool, if there is one available, otherwise
- * returns null.
- * @return {*} An object from the pool or a new one if necessary.
- */
-goog.structs.SimplePool.prototype.getObject = function() {
-  if (this.freeQueue_.length) {
-    return this.freeQueue_.pop();
-  }
-  return this.createObject();
-};
-
-
-/**
- * Releases the space in the pool held by a given object -- i.e., remove it from
- * the pool and frees up its space.
- * @param {*} obj The object to release.
- */
-goog.structs.SimplePool.prototype.releaseObject = function(obj) {
-  if (this.freeQueue_.length < this.maxCount_) {
-    this.freeQueue_.push(obj);
-  } else {
-    this.disposeObject(obj);
-  }
-};
-
-
-/**
- * Populates the pool with initialCount objects.
- * @param {number} initialCount The number of objects to add to the pool.
- * @private
- */
-goog.structs.SimplePool.prototype.createInitial_ = function(initialCount) {
-  if (initialCount > this.maxCount_) {
-    throw Error('[goog.structs.SimplePool] Initial cannot be greater than max');
-  }
-  for (var i = 0; i < initialCount; i++) {
-    this.freeQueue_.push(this.createObject());
-  }
-};
-
-
-/**
- * Should be overriden by sub-classes to return an instance of the object type
- * that is expected in the pool.
- * @return {*} The created object.
- */
-goog.structs.SimplePool.prototype.createObject = function() {
-  if (this.createObjectFn_) {
-    return this.createObjectFn_();
-  } else {
-    return {};
-  }
-};
-
-
-/**
- * Should be overriden to dispose of an object. Default implementation is to
- * remove all of the object's members, which should render it useless. Calls the
- *  object's dispose method, if available.
- * @param {*} obj The object to dispose.
- */
-goog.structs.SimplePool.prototype.disposeObject = function(obj) {
-  if (this.disposeObjectFn_) {
-    this.disposeObjectFn_(obj);
-  } else if (goog.isObject(obj)) {
-    if (goog.isFunction(obj.dispose)) {
-      obj.dispose();
-    } else {
-      for (var i in obj) {
-        delete obj[i];
-      }
-    }
-  }
-};
-
-
-/**
- * Disposes of the pool and all objects currently held in the pool.
- */
-goog.structs.SimplePool.prototype.disposeInternal = function() {
-  goog.structs.SimplePool.superClass_.disposeInternal.call(this);
-  // Call disposeObject on each object held by the pool.
-  var freeQueue = this.freeQueue_;
-  while (freeQueue.length) {
-    this.disposeObject(freeQueue.pop());
-  }
-  delete this.freeQueue_;
-};
-// Copyright 2005 The Closure Library Authors. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS-IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/**
- * @fileoverview Helper object to manage the event system pools. This should not
- * be used by itself and there should be no reason for you to depend on this
- * library.
- *
- * JScript 5.6 has some serious issues with GC so we use object pools to reduce
- * the number of object allocations.
- *
- */
-
-goog.provide('goog.events.pools');
-
-
-goog.require('goog.events.BrowserEvent');
-goog.require('goog.events.Listener');
-goog.require('goog.structs.SimplePool');
-goog.require('goog.userAgent.jscript');
-
-
-/**
- * @define {boolean} Whether to always assume the garbage collector is good.
- */
-goog.events.ASSUME_GOOD_GC = false;
-
-
-/**
- * Helper function for returning an object that is used for the lookup trees.
- * This might use an object pool depending on the script engine.
- * @return { {count_: number, remaining_: number} } A new or reused object.
- */
-goog.events.pools.getObject;
-
-
-/**
- * Helper function for releasing an object that was returned by
- * {@code goog.events.pools.getObject}. In case an object pool was used the
- * object is returned to the pool.
- * @param { {count_: number, remaining_: number} } obj The object to release.
- */
-goog.events.pools.releaseObject;
-
-
-/**
- * Helper function for returning an array.
- * This might use an object pool depending on the script engine.
- * @return {Array} A new or reused array.
- */
-goog.events.pools.getArray;
-
-
-/**
- * Helper function for releasing an array that was returned by
- * {@code goog.events.pools.getArray}. In case an object pool was used the
- * array is returned to the pool.
- * @param {Array} arr The array to release.
- */
-goog.events.pools.releaseArray;
-
-
-/**
- * Helper function for returning a proxy function as needed by
- * {@code goog.events}. This might use an object pool depending on the script
- * engine.
- * @return {Function} A new or reused function object.
- */
-goog.events.pools.getProxy;
-
-
-/**
- * Sets the callback function to use in the proxy.
- * @param {Function} cb The callback function to use.
- */
-goog.events.pools.setProxyCallbackFunction;
-
-
-/**
- * Helper function for releasing a function that was returned by
- * {@code goog.events.pools.getProxy}. In case an object pool was used the
- * function is returned to the pool.
- * @param {Function} f The function to release.
- */
-goog.events.pools.releaseProxy;
-
-
-/**
- * Helper function for returning a listener object as needed by
- * {@code goog.events}. This might use an object pool depending on the script
- * engine.
- * @return {goog.events.Listener} A new or reused listener object.
- */
-goog.events.pools.getListener;
-
-
-/**
- * Helper function for releasing a listener object that was returned by
- * {@code goog.events.pools.getListener}. In case an object pool was used the
- * listener object is returned to the pool.
- * @param {goog.events.Listener} listener The listener object to release.
- */
-goog.events.pools.releaseListener;
-
-
-/**
- * Helper function for returning a {@code goog.events.BrowserEvent} object as
- * needed by {@code goog.events}. This might use an object pool depending on the
- * script engine.
- * @return {!goog.events.BrowserEvent} A new or reused event object.
- */
-goog.events.pools.getEvent;
-
-
-/**
- * Helper function for releasing a browser event object that was returned by
- * {@code goog.events.pools.getEvent}. In case an object pool was used the
- * browser event object is returned to the pool.
- * @param {goog.events.BrowserEvent} event The event object to release.
- */
-goog.events.pools.releaseEvent;
-
-
-(function() {
-  var BAD_GC = !goog.events.ASSUME_GOOD_GC &&
-      goog.userAgent.jscript.HAS_JSCRIPT &&
-      !goog.userAgent.jscript.isVersion('5.7');
-
-  // These functions are shared between the pools' createObject functions and
-  // the non pooled versions.
-
-  function getObject() {
-    return {count_: 0, remaining_: 0};
-  }
-
-  function getArray() {
-    return [];
-  }
-
-  /**
-   * This gets set to {@code goog.events.handleBrowserEvent_} by events.js.
-   * @type {function(string, (Event|undefined))}
-   */
-  var proxyCallbackFunction;
-
-  goog.events.pools.setProxyCallbackFunction = function(cb) {
-    proxyCallbackFunction = cb;
-  };
-
-  function getProxy() {
-    // Use a local var f to prevent one allocation.
-    var f = function(eventObject) {
-      return proxyCallbackFunction.call(f.src, f.key, eventObject);
-    };
-    return f;
-  }
-
-  function getListener() {
-    return new goog.events.Listener();
-  }
-
-  function getEvent() {
-    return new goog.events.BrowserEvent();
-  }
-
-  if (!BAD_GC) {
-
-    goog.events.pools.getObject = getObject;
-    goog.events.pools.releaseObject = goog.nullFunction;
-
-    goog.events.pools.getArray = getArray;
-    goog.events.pools.releaseArray = goog.nullFunction;
-
-    goog.events.pools.getProxy = getProxy;
-    goog.events.pools.releaseProxy = goog.nullFunction;
-
-    goog.events.pools.getListener = getListener;
-    goog.events.pools.releaseListener = goog.nullFunction;
-
-    goog.events.pools.getEvent = getEvent;
-    goog.events.pools.releaseEvent = goog.nullFunction;
-
-  } else {
-
-    goog.events.pools.getObject = function() {
-      return objectPool.getObject();
-    };
-
-    goog.events.pools.releaseObject = function(obj) {
-      objectPool.releaseObject(obj);
-    };
-
-    goog.events.pools.getArray = function() {
-      return /** @type {Array} */ (arrayPool.getObject());
-    };
-
-    goog.events.pools.releaseArray = function(obj) {
-      arrayPool.releaseObject(obj);
-    };
-
-    goog.events.pools.getProxy = function() {
-      return /** @type {Function} */ (proxyPool.getObject());
-    };
-
-    goog.events.pools.releaseProxy = function(obj) {
-      proxyPool.releaseObject(getProxy());
-    };
-
-    goog.events.pools.getListener = function() {
-      return /** @type {goog.events.Listener} */ (
-          listenerPool.getObject());
-    };
-
-    goog.events.pools.releaseListener = function(obj) {
-      listenerPool.releaseObject(obj);
-    };
-
-    goog.events.pools.getEvent = function() {
-      return /** @type {goog.events.BrowserEvent} */ (eventPool.getObject());
-    };
-
-    goog.events.pools.releaseEvent = function(obj) {
-      eventPool.releaseObject(obj);
-    };
-
-    /**
-     * Initial count for the objectPool
-     */
-    var OBJECT_POOL_INITIAL_COUNT = 0;
-
-
-    /**
-     * Max count for the objectPool_
-     */
-    var OBJECT_POOL_MAX_COUNT = 600;
-
-
-    /**
-     * SimplePool to cache the lookup objects. This was implemented to make IE6
-     * performance better and removed an object allocation in goog.events.listen
-     * when in steady state.
-     */
-    var objectPool = new goog.structs.SimplePool(OBJECT_POOL_INITIAL_COUNT,
-                                                 OBJECT_POOL_MAX_COUNT);
-    objectPool.setCreateObjectFn(getObject);
-
-
-    /**
-     * Initial count for the arrayPool
-     */
-    var ARRAY_POOL_INITIAL_COUNT = 0;
-
-
-    /**
-     * Max count for the arrayPool
-     */
-    var ARRAY_POOL_MAX_COUNT = 600;
-
-
-    /**
-     * SimplePool to cache the type arrays. This was implemented to make IE6
-     * performance better and removed an object allocation in goog.events.listen
-     * when in steady state.
-     * @type {goog.structs.SimplePool}
-     */
-    var arrayPool = new goog.structs.SimplePool(ARRAY_POOL_INITIAL_COUNT,
-                                                ARRAY_POOL_MAX_COUNT);
-    arrayPool.setCreateObjectFn(getArray);
-
-
-    /**
-     * Initial count for the proxyPool
-     */
-    var HANDLE_EVENT_PROXY_POOL_INITIAL_COUNT = 0;
-
-
-    /**
-     * Max count for the proxyPool
-     */
-    var HANDLE_EVENT_PROXY_POOL_MAX_COUNT = 600;
-
-
-    /**
-     * SimplePool to cache the handle event proxy. This was implemented to make
-     * IE6 performance better and removed an object allocation in
-     * goog.events.listen when in steady state.
-     */
-    var proxyPool = new goog.structs.SimplePool(
-        HANDLE_EVENT_PROXY_POOL_INITIAL_COUNT,
-        HANDLE_EVENT_PROXY_POOL_MAX_COUNT);
-    proxyPool.setCreateObjectFn(getProxy);
-
-
-    /**
-     * Initial count for the listenerPool
-     */
-    var LISTENER_POOL_INITIAL_COUNT = 0;
-
-
-    /**
-     * Max count for the listenerPool
-     */
-    var LISTENER_POOL_MAX_COUNT = 600;
-
-
-    /**
-     * SimplePool to cache the listener objects. This was implemented to make
-     * IE6 performance better and removed an object allocation in
-     * goog.events.listen when in steady state.
-     */
-    var listenerPool = new goog.structs.SimplePool(LISTENER_POOL_INITIAL_COUNT,
-                                                   LISTENER_POOL_MAX_COUNT);
-    listenerPool.setCreateObjectFn(getListener);
-
-
-    /**
-     * Initial count for the eventPool
-     */
-    var EVENT_POOL_INITIAL_COUNT = 0;
-
-
-    /**
-     * Max count for the eventPool
-     */
-    var EVENT_POOL_MAX_COUNT = 600;
-
-
-    /**
-     * SimplePool to cache the event objects. This was implemented to make IE6
-     * performance better and removed an object allocation in
-     * goog.events.handleBrowserEvent_ when in steady state.
-     * This pool is only used for IE events.
-     */
-    var eventPool = new goog.structs.SimplePool(EVENT_POOL_INITIAL_COUNT,
-                                                EVENT_POOL_MAX_COUNT);
-    eventPool.setCreateObjectFn(getEvent);
-  }
-})();
 // Copyright 2005 The Closure Library Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11365,9 +11145,10 @@ goog.require('goog.array');
 goog.require('goog.debug.entryPointRegistry');
 goog.require('goog.debug.errorHandlerWeakDep');
 goog.require('goog.events.BrowserEvent');
+goog.require('goog.events.BrowserFeature');
 goog.require('goog.events.Event');
 goog.require('goog.events.EventWrapper');
-goog.require('goog.events.pools');
+goog.require('goog.events.Listener');
 goog.require('goog.object');
 goog.require('goog.userAgent');
 
@@ -11424,14 +11205,6 @@ goog.events.keySeparator_ = '_';
 
 
 /**
- * Whether the browser natively supports full W3C event propagation.
- * @type {boolean}
- * @private
- */
-goog.events.requiresSyntheticEventPropagation_;
-
-
-/**
  * Adds an event listener for a specific event on a DOM Node or an object that
  * has implemented {@link goog.events.EventTarget}. A listener can only be
  * added once to an object and if it is added again the key for the listener
@@ -11460,12 +11233,12 @@ goog.events.listen = function(src, type, listener, opt_capt, opt_handler) {
     var map = goog.events.listenerTree_;
 
     if (!(type in map)) {
-      map[type] = goog.events.pools.getObject();
+      map[type] = {count_: 0, remaining_: 0};
     }
     map = map[type];
 
     if (!(capture in map)) {
-      map[capture] = goog.events.pools.getObject();
+      map[capture] = {count_: 0, remaining_: 0};
       map.count_++;
     }
     map = map[capture];
@@ -11485,7 +11258,7 @@ goog.events.listen = function(src, type, listener, opt_capt, opt_handler) {
     // Do not use srcUid in map here since that will cast the number to a
     // string which will allocate one string object.
     if (!map[srcUid]) {
-      listenerArray = map[srcUid] = goog.events.pools.getArray();
+      listenerArray = map[srcUid] = [];
       map.count_++;
     } else {
       listenerArray = map[srcUid];
@@ -11508,9 +11281,9 @@ goog.events.listen = function(src, type, listener, opt_capt, opt_handler) {
       }
     }
 
-    var proxy = goog.events.pools.getProxy();
+    var proxy = goog.events.getProxy();
     proxy.src = src;
-    listenerObj = goog.events.pools.getListener();
+    listenerObj = new goog.events.Listener();
     listenerObj.init(listener, proxy, src, type, capture, opt_handler);
     var key = listenerObj.key;
     proxy.key = key;
@@ -11519,7 +11292,7 @@ goog.events.listen = function(src, type, listener, opt_capt, opt_handler) {
     goog.events.listeners_[key] = listenerObj;
 
     if (!goog.events.sources_[srcUid]) {
-      goog.events.sources_[srcUid] = goog.events.pools.getArray();
+      goog.events.sources_[srcUid] = [];
     }
     goog.events.sources_[srcUid].push(listenerObj);
 
@@ -11540,6 +11313,31 @@ goog.events.listen = function(src, type, listener, opt_capt, opt_handler) {
 
     return key;
   }
+};
+
+
+/**
+ * Helper function for returning a proxy function.
+ * @return {Function} A new or reused function object.
+ */
+goog.events.getProxy = function() {
+  var proxyCallbackFunction = goog.events.handleBrowserEvent_;
+  // Use a local var f to prevent one allocation.
+  var f = goog.events.BrowserFeature.HAS_W3C_EVENT_SUPPORT ?
+      function(eventObject) {
+        return proxyCallbackFunction.call(f.src, f.key, eventObject);
+      } :
+      function(eventObject) {
+        var v = proxyCallbackFunction.call(f.src, f.key, eventObject);
+        // NOTE(user): In IE, we hack in a capture phase. However, if
+        // there is inline event handler which tries to prevent default (for
+        // example <a href="..." onclick="return false">...</a>) in a
+        // descendant element, the prevent default will be overridden
+        // by this listener if this listener were to return true. Hence, we
+        // return undefined.
+        if (!v) return v;
+      };
+  return f;
 };
 
 
@@ -11659,7 +11457,7 @@ goog.events.unlistenByKey = function(key) {
   if (src.removeEventListener) {
     // EventTarget calls unlisten so we need to ensure that the source is not
     // an event target to prevent re-entry.
-    // TODO(user): What is this goog.global for? Why would anyone listen to
+    // TODO(arv): What is this goog.global for? Why would anyone listen to
     // events on the [[Global]] object? Is it supposed to be window? Why would
     // we not want to allow removing event listeners on the window?
     if (src == goog.global || !src.customEvent_) {
@@ -11670,7 +11468,6 @@ goog.events.unlistenByKey = function(key) {
   }
 
   var srcUid = goog.getUid(src);
-  var listenerArray = goog.events.listenerTree_[type][capture][srcUid];
 
   // In a perfect implementation we would decrement the remaining_ field here
   // but then we would need to know if the listener has already been fired or
@@ -11687,8 +11484,19 @@ goog.events.unlistenByKey = function(key) {
   }
 
   listener.removed = true;
-  listenerArray.needsCleanup_ = true;
-  goog.events.cleanUp_(type, capture, srcUid, listenerArray);
+
+  // There are some esoteric situations where the hash code of an object
+  // can change, and we won't be able to find the listenerArray anymore.
+  // For example, if you're listening on a window, and the user navigates to
+  // a different window, the UID will disappear.
+  //
+  // It should be impossible to ever find the original listenerArray, so it
+  // doesn't really matter if we can't clean it up in this case.
+  var listenerArray = goog.events.listenerTree_[type][capture][srcUid];
+  if (listenerArray) {
+    listenerArray.needsCleanup_ = true;
+    goog.events.cleanUp_(type, capture, srcUid, listenerArray);
+  }
 
   delete goog.events.listeners_[key];
 
@@ -11742,8 +11550,6 @@ goog.events.cleanUp_ = function(type, capture, srcUid, listenerArray) {
         if (listenerArray[oldIndex].removed) {
           var proxy = listenerArray[oldIndex].proxy;
           proxy.src = null;
-          goog.events.pools.releaseProxy(proxy);
-          goog.events.pools.releaseListener(listenerArray[oldIndex]);
           continue;
         }
         if (oldIndex != newIndex) {
@@ -11757,19 +11563,15 @@ goog.events.cleanUp_ = function(type, capture, srcUid, listenerArray) {
 
       // In case the length is now zero we release the object.
       if (newIndex == 0) {
-        goog.events.pools.releaseArray(listenerArray);
         delete goog.events.listenerTree_[type][capture][srcUid];
         goog.events.listenerTree_[type][capture].count_--;
 
         if (goog.events.listenerTree_[type][capture].count_ == 0) {
-          goog.events.pools.releaseObject(
-              goog.events.listenerTree_[type][capture]);
           delete goog.events.listenerTree_[type][capture];
           goog.events.listenerTree_[type].count_--;
         }
 
         if (goog.events.listenerTree_[type].count_ == 0) {
-          goog.events.pools.releaseObject(goog.events.listenerTree_[type]);
           delete goog.events.listenerTree_[type];
         }
       }
@@ -11889,7 +11691,11 @@ goog.events.getListener = function(src, type, listener, opt_capt, opt_handler) {
   var listenerArray = goog.events.getListeners_(src, type, capture);
   if (listenerArray) {
     for (var i = 0; i < listenerArray.length; i++) {
-      if (listenerArray[i].listener == listener &&
+      // If goog.events.unlistenByKey is called during an event dispatch
+      // then the listener array won't get cleaned up and there might be
+      // 'removed' listeners in the list. Ignore those.
+      if (!listenerArray[i].removed &&
+          listenerArray[i].listener == listener &&
           listenerArray[i].capture == capture &&
           listenerArray[i].handler == opt_handler) {
         // We already have this listener. Return its key.
@@ -12056,11 +11862,10 @@ goog.events.fireListeners_ = function(map, obj, type, capture, eventObject) {
  * @return {boolean} Result of listener.
  */
 goog.events.fireListener = function(listener, eventObject) {
-  var rv = listener.handleEvent(eventObject);
   if (listener.callOnce) {
     goog.events.unlistenByKey(listener.key);
   }
-  return rv;
+  return listener.handleEvent(eventObject);
 };
 
 
@@ -12180,7 +11985,6 @@ goog.events.dispatchEvent = function(src, e) {
 goog.events.protectBrowserEventEntryPoint = function(errorHandler) {
   goog.events.handleBrowserEvent_ = errorHandler.protectEntryPoint(
       goog.events.handleBrowserEvent_);
-  goog.events.pools.setProxyCallbackFunction(goog.events.handleBrowserEvent_);
 };
 
 
@@ -12188,7 +11992,7 @@ goog.events.protectBrowserEventEntryPoint = function(errorHandler) {
  * Handles an event and dispatches it to the correct listeners. This
  * function is a proxy for the real listener the user specified.
  *
- * @param {string} key Unique key for the listener.
+ * @param {number} key Unique key for the listener.
  * @param {Event=} opt_evt Optional event object that gets passed in via the
  *     native event handlers.
  * @return {boolean} Result of the event handler.
@@ -12213,7 +12017,9 @@ goog.events.handleBrowserEvent_ = function(key, opt_evt) {
   }
   map = map[type];
   var retval, targetsMap;
-  if (goog.events.synthesizeEventPropagation_()) {
+  // Synthesize event propagation if the browser does not support W3C
+  // event model.
+  if (!goog.events.BrowserFeature.HAS_W3C_EVENT_SUPPORT) {
     var ieEvent = opt_evt ||
         /** @type {Event} */ (goog.getObjectByName('window.event'));
 
@@ -12229,13 +12035,13 @@ goog.events.handleBrowserEvent_ = function(key, opt_evt) {
       goog.events.markIeEvent_(ieEvent);
     }
 
-    var evt = goog.events.pools.getEvent();
+    var evt = new goog.events.BrowserEvent();
     evt.init(ieEvent, this);
 
     retval = true;
     try {
       if (hasCapture) {
-        var ancestors = goog.events.pools.getArray();
+        var ancestors = [];
 
         for (var parent = evt.currentTarget;
              parent;
@@ -12278,28 +12084,16 @@ goog.events.handleBrowserEvent_ = function(key, opt_evt) {
     } finally {
       if (ancestors) {
         ancestors.length = 0;
-        goog.events.pools.releaseArray(ancestors);
       }
-      evt.dispose();
-      goog.events.pools.releaseEvent(evt);
     }
     return retval;
   } // IE
 
   // Caught a non-IE DOM event. 1 additional argument which is the event object
   var be = new goog.events.BrowserEvent(opt_evt, this);
-  try {
-    retval = goog.events.fireListener(listener, be);
-  } finally {
-    be.dispose();
-  }
+  retval = goog.events.fireListener(listener, be);
   return retval;
 };
-
-
-// Set the callback for the proxy pool. This is done here to prevent circular
-// dependencies.
-goog.events.pools.setProxyCallbackFunction(goog.events.handleBrowserEvent_);
 
 
 /**
@@ -12346,7 +12140,6 @@ goog.events.markIeEvent_ = function(e) {
  * @param {Event} e  The IE browser event.
  * @return {boolean} True if the event object has been marked.
  * @private
- * @notypecheck TODO(nicksantos): Fix this.
  */
 goog.events.isMarkedIeEvent_ = function(e) {
   return e.keyCode < 0 || e.returnValue != undefined;
@@ -12372,26 +12165,6 @@ goog.events.getUniqueId = function(identifier) {
 };
 
 
-/**
- * Returns whether we should synthesize the W3C event propagation.  Versions of
- * IE, up to IE9, don't support addEventListener or the capture phase.
- * @return {boolean} Whether to use IE's proprietary event model.
- * @private
- */
-goog.events.synthesizeEventPropagation_ = function() {
-  if (goog.events.requiresSyntheticEventPropagation_ === undefined) {
-    // TODO(user): goog.events is used in a non DOM context, even though it
-    // couldn't be used with DOM events.  We therefore assume that if we
-    // got here that goog.global===window to keep the compiler happy.  We can't
-    // use navigator.userAgent yet because the IE9 platform preview still
-    // reports as MSIE 8.0.
-    goog.events.requiresSyntheticEventPropagation_ =
-        goog.userAgent.IE && !goog.global['addEventListener'];
-  }
-  return goog.events.requiresSyntheticEventPropagation_;
-};
-
-
 // Register the browser event handler as an entry point, so that
 // it can be monitored for exception handling, etc.
 goog.debug.entryPointRegistry.register(
@@ -12401,8 +12174,6 @@ goog.debug.entryPointRegistry.register(
      */
     function(transformer) {
       goog.events.handleBrowserEvent_ = transformer(
-          goog.events.handleBrowserEvent_);
-      goog.events.pools.setProxyCallbackFunction(
           goog.events.handleBrowserEvent_);
     });
 // Copyright 2005 The Closure Library Authors. All Rights Reserved.
@@ -12426,21 +12197,21 @@ goog.debug.entryPointRegistry.register(
  * Example:
  * <pre>
  * function Something() {
- *   goog.events.EventHandler.call(this);
+ *   goog.base(this);
  *
  *   ... set up object ...
  *
  *   // Add event listeners
- *   this.listen(this.starEl, 'click', this.handleStar);
- *   this.listen(this.headerEl, 'click', this.expand);
- *   this.listen(this.collapseEl, 'click', this.collapse);
- *   this.listen(this.infoEl, 'mouseover', this.showHover);
- *   this.listen(this.infoEl, 'mouseout', this.hideHover);
+ *   this.listen(this.starEl, goog.events.EventType.CLICK, this.handleStar);
+ *   this.listen(this.headerEl, goog.events.EventType.CLICK, this.expand);
+ *   this.listen(this.collapseEl, goog.events.EventType.CLICK, this.collapse);
+ *   this.listen(this.infoEl, goog.events.EventType.MOUSEOVER, this.showHover);
+ *   this.listen(this.infoEl, goog.events.EventType.MOUSEOUT, this.hideHover);
  * }
  * goog.inherits(Something, goog.events.EventHandler);
  *
  * Something.prototype.disposeInternal = function() {
- *   Something.superClass_.disposeInternal.call(this);
+ *   goog.base(this, 'disposeInternal');
  *   goog.dom.removeNode(this.container);
  * };
  *
@@ -12465,19 +12236,16 @@ goog.debug.entryPointRegistry.register(
 goog.provide('goog.events.EventHandler');
 
 goog.require('goog.Disposable');
+goog.require('goog.array');
 goog.require('goog.events');
 goog.require('goog.events.EventWrapper');
-goog.require('goog.object');
-goog.require('goog.structs.SimplePool');
 
 
 
 /**
  * Super class for objects that want to easily manage a number of event
  * listeners.  It allows a short cut to listen and also provides a quick way
- * to remove all events listeners belonging to this object. It is optimized to
- * use less objects if only one event is being listened to, but if that's the
- * case, it may not be worth using the EventHandler anyway.
+ * to remove all events listeners belonging to this object.
  * @param {Object=} opt_handler Object in whose scope to call the listeners.
  * @constructor
  * @extends {goog.Disposable}
@@ -12485,54 +12253,15 @@ goog.require('goog.structs.SimplePool');
 goog.events.EventHandler = function(opt_handler) {
   goog.Disposable.call(this);
   this.handler_ = opt_handler;
+
+  /**
+   * Keys for events that are being listened to.
+   * @type {Array.<number>}
+   * @private
+   */
+  this.keys_ = [];
 };
 goog.inherits(goog.events.EventHandler, goog.Disposable);
-
-
-/**
- * Initial count for the keyPool_
- * @type {number}
- */
-goog.events.EventHandler.KEY_POOL_INITIAL_COUNT = 0;
-
-
-/**
- * Max count for the keyPool_
- * @type {number}
- */
-goog.events.EventHandler.KEY_POOL_MAX_COUNT = 100;
-
-
-/**
- * SimplePool to cache the key object. This was implemented to make IE6
- * performance better and removed an object allocation in the listen method
- * when in steady state.
- * @type {goog.structs.SimplePool}
- * @private
- */
-goog.events.EventHandler.keyPool_ = new goog.structs.SimplePool(
-    goog.events.EventHandler.KEY_POOL_INITIAL_COUNT,
-    goog.events.EventHandler.KEY_POOL_MAX_COUNT);
-
-
-/**
- * Keys for events that are being listened to. This is used once there are more
- * than one event to listen to. If there is only one event to listen to, key_
- * is used.
- * @type {Object}
- * @private
- */
-goog.events.EventHandler.keys_ = null;
-
-
-/**
- * Keys for event that is being listened to if only one event is being listened
- * to. This is a performance optimization to avoid creating an extra object
- * if not necessary.
- * @type {?string}
- * @private
- */
-goog.events.EventHandler.key_ = null;
 
 
 /**
@@ -12566,11 +12295,13 @@ goog.events.EventHandler.prototype.listen = function(src, type, opt_fn,
     type = goog.events.EventHandler.typeArray_;
   }
   for (var i = 0; i < type.length; i++) {
+    // goog.events.listen generates unique keys so we don't have to check their
+    // presence in the this.keys_ array.
     var key = (/** @type {number} */
         goog.events.listen(src, type[i], opt_fn || this,
                            opt_capture || false,
                            opt_handler || this.handler_ || this));
-    this.recordListenerKey_(key);
+    this.keys_.push(key);
   }
 
   return this;
@@ -12601,10 +12332,9 @@ goog.events.EventHandler.prototype.listenOnce = function(src, type, opt_fn,
     }
   } else {
     var key = (/** @type {number} */
-        goog.events.listenOnce(src, type, opt_fn || this,
-                               opt_capture || false,
+        goog.events.listenOnce(src, type, opt_fn || this, opt_capture,
                                opt_handler || this.handler_ || this));
-    this.recordListenerKey_(key);
+    this.keys_.push(key);
   }
 
   return this;
@@ -12629,31 +12359,17 @@ goog.events.EventHandler.prototype.listenOnce = function(src, type, opt_fn,
  */
 goog.events.EventHandler.prototype.listenWithWrapper = function(src, wrapper,
     listener, opt_capt, opt_handler) {
-  wrapper.listen(src, listener, opt_capt, opt_handler || this.handler_, this);
+  wrapper.listen(src, listener, opt_capt, opt_handler || this.handler_ || this,
+                 this);
   return this;
 };
 
 
 /**
- * Record the key returned for the listener so that it can be user later
- * to remove the listener.
- * @param {number} key Unique key for the listener.
- * @private
+ * @return {number} Number of listeners registered by this handler.
  */
-goog.events.EventHandler.prototype.recordListenerKey_ = function(key) {
-  if (this.keys_) {
-    // already have multiple keys
-    this.keys_[key] = true;
-  } else if (this.key_) {
-    // going from one key to multiple - must now use object as map
-    this.keys_ = goog.events.EventHandler.keyPool_.getObject();
-    this.keys_[this.key_] = true;
-    this.key_ = null;
-    this.keys_[key] = true;
-  } else {
-    // first key - can use single key
-    this.key_ = key;
-  }
+goog.events.EventHandler.prototype.getListenerCount = function() {
+  return this.keys_.length;
 };
 
 
@@ -12671,25 +12387,18 @@ goog.events.EventHandler.prototype.recordListenerKey_ = function(key) {
 goog.events.EventHandler.prototype.unlisten = function(src, type, opt_fn,
                                                        opt_capture,
                                                        opt_handler) {
-  if (this.key_ || this.keys_) {
-    if (goog.isArray(type)) {
-      for (var i = 0; i < type.length; i++) {
-        this.unlisten(src, type[i], opt_fn, opt_capture, opt_handler);
-      }
-    } else {
-      var listener = goog.events.getListener(src, type, opt_fn || this,
-          opt_capture || false, opt_handler || this.handler_ || this);
+  if (goog.isArray(type)) {
+    for (var i = 0; i < type.length; i++) {
+      this.unlisten(src, type[i], opt_fn, opt_capture, opt_handler);
+    }
+  } else {
+    var listener = goog.events.getListener(src, type, opt_fn || this,
+        opt_capture, opt_handler || this.handler_ || this);
 
-      if (listener) {
-        var key = listener.key;
-        goog.events.unlistenByKey(key);
-
-        if (this.keys_) {
-          goog.object.remove(this.keys_, key);
-        } else if (this.key_ == key) {
-          this.key_ = null;
-        }
-      }
+    if (listener) {
+      var key = listener.key;
+      goog.events.unlistenByKey(key);
+      goog.array.remove(this.keys_, key);
     }
   }
 
@@ -12713,7 +12422,8 @@ goog.events.EventHandler.prototype.unlisten = function(src, type, opt_fn,
  */
 goog.events.EventHandler.prototype.unlistenWithWrapper = function(src, wrapper,
     listener, opt_capt, opt_handler) {
-  wrapper.unlisten(src, listener, opt_capt, opt_handler || this.handler_, this);
+  wrapper.unlisten(src, listener, opt_capt,
+                   opt_handler || this.handler_ || this, this);
   return this;
 };
 
@@ -12722,23 +12432,15 @@ goog.events.EventHandler.prototype.unlistenWithWrapper = function(src, wrapper,
  * Unlistens to all events.
  */
 goog.events.EventHandler.prototype.removeAll = function() {
-  if (this.keys_) {
-    for (var key in this.keys_) {
-      goog.events.unlistenByKey((/** @type {number} */ key));
-      // Clean the keys before returning object to the pool.
-      delete this.keys_[key];
-    }
-    goog.events.EventHandler.keyPool_.releaseObject(this.keys_);
-    this.keys_ = null;
-
-  } else if (this.key_) {
-    goog.events.unlistenByKey(this.key_);
-  }
+  goog.array.forEach(this.keys_, goog.events.unlistenByKey);
+  this.keys_.length = 0;
 };
 
 
 /**
- * Disposes of this EventHandler and remove all listeners that it registered.
+ * Disposes of this EventHandler and removes all listeners that it registered.
+ * @override
+ * @protected
  */
 goog.events.EventHandler.prototype.disposeInternal = function() {
   goog.events.EventHandler.superClass_.disposeInternal.call(this);
@@ -12769,6 +12471,7 @@ goog.events.EventHandler.prototype.handleEvent = function(e) {
 
 /**
  * @fileoverview JSON utility functions.
+ * @author arv@google.com (Erik Arvidsson)
  */
 
 
@@ -12840,7 +12543,7 @@ goog.json.parse = function(s) {
   if (goog.json.isValid_(o)) {
     /** @preserveTry */
     try {
-      return eval('(' + o + ')');
+      return /** @type {Object} */ (eval('(' + o + ')'));
     } catch (ex) {
     }
   }
@@ -12856,28 +12559,50 @@ goog.json.parse = function(s) {
  * @return {Object} The object generated from the JSON string.
  */
 goog.json.unsafeParse = function(s) {
-  return eval('(' + s + ')');
+  return /** @type {Object} */ (eval('(' + s + ')'));
 };
+
+
+/**
+ * JSON replacer, as defined in Section 15.12.3 of the ES5 spec.
+ *
+ * TODO(nicksantos): Array should also be a valid replacer.
+ *
+ * @typedef {function(this:Object, string, *): *}
+ */
+goog.json.Replacer;
 
 
 /**
  * Serializes an object or a value to a JSON string.
  *
  * @param {*} object The object to serialize.
+ * @param {?goog.json.Replacer=} opt_replacer A replacer function
+ *     called for each (key, value) pair that determines how the value
+ *     should be serialized. By defult, this just returns the value
+ *     and allows default serialization to kick in.
  * @throws Error if there are loops in the object graph.
  * @return {string} A JSON string representation of the input.
  */
-goog.json.serialize = function(object) {
-  return new goog.json.Serializer().serialize(object);
+goog.json.serialize = function(object, opt_replacer) {
+  // TODO(nicksantos): Change this to default to JSON.stringify when available.
+  // I need to fiddle with the default externs a bit to make this happen.
+  return new goog.json.Serializer(opt_replacer).serialize(object);
 };
 
 
 
 /**
  * Class that is used to serialize JSON objects to a string.
+ * @param {?goog.json.Replacer=} opt_replacer Replacer.
  * @constructor
  */
-goog.json.Serializer = function() {
+goog.json.Serializer = function(opt_replacer) {
+  /**
+   * @type {goog.json.Replacer|null|undefined}
+   * @private
+   */
+  this.replacer_ = opt_replacer;
 };
 
 
@@ -12922,7 +12647,7 @@ goog.json.Serializer.prototype.serialize_ = function(object, sb) {
         break;
       }
       if (goog.isArray(object)) {
-        this.serializeArray_((/** @type {!Array} */ object), sb);
+        this.serializeArray((/** @type {!Array} */ object), sb);
         break;
       }
       // should we allow new String, new Number and new Boolean to be treated
@@ -13013,17 +12738,22 @@ goog.json.Serializer.prototype.serializeNumber_ = function(n, sb) {
 
 /**
  * Serializes an array to a JSON string
- * @private
  * @param {Array} arr The array to serialize.
  * @param {Array} sb Array used as a string builder.
+ * @protected
  */
-goog.json.Serializer.prototype.serializeArray_ = function(arr, sb) {
+goog.json.Serializer.prototype.serializeArray = function(arr, sb) {
   var l = arr.length;
   sb.push('[');
   var sep = '';
   for (var i = 0; i < l; i++) {
     sb.push(sep);
-    this.serialize_(arr[i], sb);
+
+    var value = arr[i];
+    this.serialize_(
+        this.replacer_ ? this.replacer_.call(arr, String(i), value) : value,
+        sb);
+
     sep = ',';
   }
   sb.push(']');
@@ -13048,7 +12778,11 @@ goog.json.Serializer.prototype.serializeObject_ = function(obj, sb) {
         sb.push(sep);
         this.serializeString_(key, sb);
         sb.push(':');
-        this.serialize_(value, sb);
+
+        this.serialize_(
+            this.replacer_ ? this.replacer_.call(obj, key, value) : value,
+            sb);
+
         sep = ',';
       }
     }
@@ -13179,12 +12913,12 @@ linktweak.globals.generatePresetRules = function(presets) {
 linktweak.globals.loadSettings = function() {
   var settings = null;
   try {
-	settings = goog.json.parse(localStorage[linktweak.globals.SETTINGS_STORAGE_NAME]);
+	settings = JSON.parse(localStorage[linktweak.globals.SETTINGS_STORAGE_NAME]);
   }catch(e) {}
   if(!settings) {
 	try{
 	  settings = linktweak.globals.convertSettingsV0(
-		goog.json.parse(localStorage['rewriterules'] || ''));
+		JSON.parse(localStorage['rewriterules'] || ''));
 	}catch(e) {}
   }
 
@@ -13257,15 +12991,15 @@ goog.dom.classes.set = function(element, className) {
 /**
  * Gets an array of class names on an element
  * @param {Node} element DOM node to get class of.
- * @return {Array} Class names on {@code element}.
+ * @return {!Array} Class names on {@code element}. Some browsers add extra
+ *     properties to the array. Do not depend on any of these!
  */
 goog.dom.classes.get = function(element) {
   var className = element.className;
   // Some types of elements don't have a className in IE (e.g. iframes).
   // Furthermore, in Firefox, className is not a string when the element is
   // an SVG element.
-  return className && typeof className.split == 'function' ?
-      className.split(/\s+/) : [];
+  return goog.isString(className) && className.match(/\S+/g) || [];
 };
 
 
@@ -13278,11 +13012,10 @@ goog.dom.classes.get = function(element) {
 goog.dom.classes.add = function(element, var_args) {
   var classes = goog.dom.classes.get(element);
   var args = goog.array.slice(arguments, 1);
-
-  var b = goog.dom.classes.add_(classes, args);
+  var expectedCount = classes.length + args.length;
+  goog.dom.classes.add_(classes, args);
   element.className = classes.join(' ');
-
-  return b;
+  return classes.length == expectedCount;
 };
 
 
@@ -13296,11 +13029,9 @@ goog.dom.classes.add = function(element, var_args) {
 goog.dom.classes.remove = function(element, var_args) {
   var classes = goog.dom.classes.get(element);
   var args = goog.array.slice(arguments, 1);
-
-  var b = goog.dom.classes.remove_(classes, args);
-  element.className = classes.join(' ');
-
-  return b;
+  var newClasses = goog.dom.classes.getDifference_(classes, args);
+  element.className = newClasses.join(' ');
+  return newClasses.length == classes.length - args.length;
 };
 
 
@@ -13311,40 +13042,30 @@ goog.dom.classes.remove = function(element, var_args) {
  * @param {Array.<string>} classes All class names for the element, will be
  *     updated to have the classes supplied in {@code args} added.
  * @param {Array.<string>} args Class names to add.
- * @return {boolean} Whether all classes in were added.
  * @private
  */
 goog.dom.classes.add_ = function(classes, args) {
-  var rv = 0;
   for (var i = 0; i < args.length; i++) {
     if (!goog.array.contains(classes, args[i])) {
       classes.push(args[i]);
-      rv++;
     }
   }
-  return rv == args.length;
 };
 
 
 /**
  * Helper method for {@link goog.dom.classes.remove} and
- * {@link goog.dom.classes.addRemove}. Removes one or more classes from the
- * supplied classes array.
- * @param {Array.<string>} classes All class names for the element, will be
- *     updated to have the classes supplied in {@code args} removed.
- * @param {Array.<string>} args Class names to remove.
- * @return {boolean} Whether all classes in were found and removed.
+ * {@link goog.dom.classes.addRemove}. Calculates the difference of two arrays.
+ * @param {!Array.<string>} arr1 First array.
+ * @param {!Array.<string>} arr2 Second array.
+ * @return {!Array.<string>} The first array without the elements of the second
+ *     array.
  * @private
  */
-goog.dom.classes.remove_ = function(classes, args) {
-  var rv = 0;
-  for (var i = 0; i < classes.length; i++) {
-    if (goog.array.contains(args, classes[i])) {
-      goog.array.splice(classes, i--, 1);
-      rv++;
-    }
-  }
-  return rv == args.length;
+goog.dom.classes.getDifference_ = function(arr1, arr2) {
+  return goog.array.filter(arr1, function(item) {
+    return !goog.array.contains(arr2, item);
+  });
 };
 
 
@@ -13387,9 +13108,9 @@ goog.dom.classes.swap = function(element, fromClass, toClass) {
  * more than two class names that you want to swap.
  *
  * @param {Node} element DOM node to swap classes on.
- * @param {string|Array.<string>|null} classesToRemove Class or classes to
+ * @param {?(string|Array.<string>)} classesToRemove Class or classes to
  *     remove, if null no classes are removed.
- * @param {string|Array.<string>|null} classesToAdd Class or classes to add, if
+ * @param {?(string|Array.<string>)} classesToAdd Class or classes to add, if
  *     null no classes are added.
  */
 goog.dom.classes.addRemove = function(element, classesToRemove, classesToAdd) {
@@ -13397,7 +13118,7 @@ goog.dom.classes.addRemove = function(element, classesToRemove, classesToAdd) {
   if (goog.isString(classesToRemove)) {
     goog.array.remove(classes, classesToRemove);
   } else if (goog.isArray(classesToRemove)) {
-    goog.dom.classes.remove_(classes, classesToRemove);
+    classes = goog.dom.classes.getDifference_(classes, classesToRemove);
   }
 
   if (goog.isString(classesToAdd) &&
@@ -13486,6 +13207,7 @@ goog.dom.TagName = {
   ADDRESS: 'ADDRESS',
   APPLET: 'APPLET',
   AREA: 'AREA',
+  AUDIO: 'AUDIO',
   B: 'B',
   BASE: 'BASE',
   BASEFONT: 'BASEFONT',
@@ -13571,7 +13293,8 @@ goog.dom.TagName = {
   TT: 'TT',
   U: 'U',
   UL: 'UL',
-  VAR: 'VAR'
+  VAR: 'VAR',
+  VIDEO: 'VIDEO'
 };
 // Copyright 2007 The Closure Library Authors. All Rights Reserved.
 //
@@ -13648,6 +13371,7 @@ if (goog.DEBUG) {
   /**
    * Returns a nice string representing size.
    * @return {string} In the form (50 x 73).
+   * @override
    */
   goog.math.Size.prototype.toString = function() {
     return '(' + this.width + ' x ' + this.height + ')';
@@ -13809,7 +13533,7 @@ goog.dom.BrowserFeature = {
    * created. False in Internet Explorer prior to version 9.
    */
   CAN_ADD_NAME_OR_TYPE_ATTRIBUTES: !goog.userAgent.IE ||
-      goog.userAgent.isVersion('9'),
+      goog.userAgent.isDocumentMode(9),
 
   /**
    * Whether we can use element.children to access an element's Element
@@ -13817,14 +13541,21 @@ goog.dom.BrowserFeature = {
    * nodes in the collection.)
    */
   CAN_USE_CHILDREN_ATTRIBUTE: !goog.userAgent.GECKO && !goog.userAgent.IE ||
-      goog.userAgent.IE && goog.userAgent.isVersion('9') ||
+      goog.userAgent.IE && goog.userAgent.isDocumentMode(9) ||
       goog.userAgent.GECKO && goog.userAgent.isVersion('1.9.1'),
 
   /**
    * Opera, Safari 3, and Internet Explorer 9 all support innerText but they
-   * include text nodes in script and style tags.
+   * include text nodes in script and style tags. Not document-mode-dependent.
    */
   CAN_USE_INNER_TEXT: goog.userAgent.IE && !goog.userAgent.isVersion('9'),
+
+  /**
+   * MSIE, Opera, and Safari>=4 support element.parentElement to access an
+   * element's parent if it is an Element.
+   */
+  CAN_USE_PARENT_ELEMENT_PROPERTY: goog.userAgent.IE || goog.userAgent.OPERA ||
+      goog.userAgent.WEBKIT,
 
   /**
    * Whether NoScope elements need a scoped element written before them in
@@ -13848,11 +13579,368 @@ goog.dom.BrowserFeature = {
 // limitations under the License.
 
 /**
+ * @fileoverview Additional mathematical functions.
+ */
+
+goog.provide('goog.math');
+
+goog.require('goog.array');
+
+
+/**
+ * Returns a random integer greater than or equal to 0 and less than {@code a}.
+ * @param {number} a  The upper bound for the random integer (exclusive).
+ * @return {number} A random integer N such that 0 <= N < a.
+ */
+goog.math.randomInt = function(a) {
+  return Math.floor(Math.random() * a);
+};
+
+
+/**
+ * Returns a random number greater than or equal to {@code a} and less than
+ * {@code b}.
+ * @param {number} a  The lower bound for the random number (inclusive).
+ * @param {number} b  The upper bound for the random number (exclusive).
+ * @return {number} A random number N such that a <= N < b.
+ */
+goog.math.uniformRandom = function(a, b) {
+  return a + Math.random() * (b - a);
+};
+
+
+/**
+ * Takes a number and clamps it to within the provided bounds.
+ * @param {number} value The input number.
+ * @param {number} min The minimum value to return.
+ * @param {number} max The maximum value to return.
+ * @return {number} The input number if it is within bounds, or the nearest
+ *     number within the bounds.
+ */
+goog.math.clamp = function(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+};
+
+
+/**
+ * The % operator in JavaScript returns the remainder of a / b, but differs from
+ * some other languages in that the result will have the same sign as the
+ * dividend. For example, -1 % 8 == -1, whereas in some other languages
+ * (such as Python) the result would be 7. This function emulates the more
+ * correct modulo behavior, which is useful for certain applications such as
+ * calculating an offset index in a circular list.
+ *
+ * @param {number} a The dividend.
+ * @param {number} b The divisor.
+ * @return {number} a % b where the result is between 0 and b (either 0 <= x < b
+ *     or b < x <= 0, depending on the sign of b).
+ */
+goog.math.modulo = function(a, b) {
+  var r = a % b;
+  // If r and b differ in sign, add b to wrap the result to the correct sign.
+  return (r * b < 0) ? r + b : r;
+};
+
+
+/**
+ * Performs linear interpolation between values a and b. Returns the value
+ * between a and b proportional to x (when x is between 0 and 1. When x is
+ * outside this range, the return value is a linear extrapolation).
+ * @param {number} a A number.
+ * @param {number} b A number.
+ * @param {number} x The proportion between a and b.
+ * @return {number} The interpolated value between a and b.
+ */
+goog.math.lerp = function(a, b, x) {
+  return a + x * (b - a);
+};
+
+
+/**
+ * Tests whether the two values are equal to each other, within a certain
+ * tolerance to adjust for floating pount errors.
+ * @param {number} a A number.
+ * @param {number} b A number.
+ * @param {number=} opt_tolerance Optional tolerance range. Defaults
+ *     to 0.000001. If specified, should be greater than 0.
+ * @return {boolean} Whether {@code a} and {@code b} are nearly equal.
+ */
+goog.math.nearlyEquals = function(a, b, opt_tolerance) {
+  return Math.abs(a - b) <= (opt_tolerance || 0.000001);
+};
+
+
+/**
+ * Standardizes an angle to be in range [0-360). Negative angles become
+ * positive, and values greater than 360 are returned modulo 360.
+ * @param {number} angle Angle in degrees.
+ * @return {number} Standardized angle.
+ */
+goog.math.standardAngle = function(angle) {
+  return goog.math.modulo(angle, 360);
+};
+
+
+/**
+ * Converts degrees to radians.
+ * @param {number} angleDegrees Angle in degrees.
+ * @return {number} Angle in radians.
+ */
+goog.math.toRadians = function(angleDegrees) {
+  return angleDegrees * Math.PI / 180;
+};
+
+
+/**
+ * Converts radians to degrees.
+ * @param {number} angleRadians Angle in radians.
+ * @return {number} Angle in degrees.
+ */
+goog.math.toDegrees = function(angleRadians) {
+  return angleRadians * 180 / Math.PI;
+};
+
+
+/**
+ * For a given angle and radius, finds the X portion of the offset.
+ * @param {number} degrees Angle in degrees (zero points in +X direction).
+ * @param {number} radius Radius.
+ * @return {number} The x-distance for the angle and radius.
+ */
+goog.math.angleDx = function(degrees, radius) {
+  return radius * Math.cos(goog.math.toRadians(degrees));
+};
+
+
+/**
+ * For a given angle and radius, finds the Y portion of the offset.
+ * @param {number} degrees Angle in degrees (zero points in +X direction).
+ * @param {number} radius Radius.
+ * @return {number} The y-distance for the angle and radius.
+ */
+goog.math.angleDy = function(degrees, radius) {
+  return radius * Math.sin(goog.math.toRadians(degrees));
+};
+
+
+/**
+ * Computes the angle between two points (x1,y1) and (x2,y2).
+ * Angle zero points in the +X direction, 90 degrees points in the +Y
+ * direction (down) and from there we grow clockwise towards 360 degrees.
+ * @param {number} x1 x of first point.
+ * @param {number} y1 y of first point.
+ * @param {number} x2 x of second point.
+ * @param {number} y2 y of second point.
+ * @return {number} Standardized angle in degrees of the vector from
+ *     x1,y1 to x2,y2.
+ */
+goog.math.angle = function(x1, y1, x2, y2) {
+  return goog.math.standardAngle(goog.math.toDegrees(Math.atan2(y2 - y1,
+                                                                x2 - x1)));
+};
+
+
+/**
+ * Computes the difference between startAngle and endAngle (angles in degrees).
+ * @param {number} startAngle  Start angle in degrees.
+ * @param {number} endAngle  End angle in degrees.
+ * @return {number} The number of degrees that when added to
+ *     startAngle will result in endAngle. Positive numbers mean that the
+ *     direction is clockwise. Negative numbers indicate a counter-clockwise
+ *     direction.
+ *     The shortest route (clockwise vs counter-clockwise) between the angles
+ *     is used.
+ *     When the difference is 180 degrees, the function returns 180 (not -180)
+ *     angleDifference(30, 40) is 10, and angleDifference(40, 30) is -10.
+ *     angleDifference(350, 10) is 20, and angleDifference(10, 350) is -20.
+ */
+goog.math.angleDifference = function(startAngle, endAngle) {
+  var d = goog.math.standardAngle(endAngle) -
+          goog.math.standardAngle(startAngle);
+  if (d > 180) {
+    d = d - 360;
+  } else if (d <= -180) {
+    d = 360 + d;
+  }
+  return d;
+};
+
+
+/**
+ * Returns the sign of a number as per the "sign" or "signum" function.
+ * @param {number} x The number to take the sign of.
+ * @return {number} -1 when negative, 1 when positive, 0 when 0.
+ */
+goog.math.sign = function(x) {
+  return x == 0 ? 0 : (x < 0 ? -1 : 1);
+};
+
+
+/**
+ * JavaScript implementation of Longest Common Subsequence problem.
+ * http://en.wikipedia.org/wiki/Longest_common_subsequence
+ *
+ * Returns the longest possible array that is subarray of both of given arrays.
+ *
+ * @param {Array.<Object>} array1 First array of objects.
+ * @param {Array.<Object>} array2 Second array of objects.
+ * @param {Function=} opt_compareFn Function that acts as a custom comparator
+ *     for the array ojects. Function should return true if objects are equal,
+ *     otherwise false.
+ * @param {Function=} opt_collectorFn Function used to decide what to return
+ *     as a result subsequence. It accepts 2 arguments: index of common element
+ *     in the first array and index in the second. The default function returns
+ *     element from the first array.
+ * @return {Array.<Object>} A list of objects that are common to both arrays
+ *     such that there is no common subsequence with size greater than the
+ *     length of the list.
+ */
+goog.math.longestCommonSubsequence = function(
+    array1, array2, opt_compareFn, opt_collectorFn) {
+
+  var compare = opt_compareFn || function(a, b) {
+    return a == b;
+  };
+
+  var collect = opt_collectorFn || function(i1, i2) {
+    return array1[i1];
+  };
+
+  var length1 = array1.length;
+  var length2 = array2.length;
+
+  var arr = [];
+  for (var i = 0; i < length1 + 1; i++) {
+    arr[i] = [];
+    arr[i][0] = 0;
+  }
+
+  for (var j = 0; j < length2 + 1; j++) {
+    arr[0][j] = 0;
+  }
+
+  for (i = 1; i <= length1; i++) {
+    for (j = 1; j <= length1; j++) {
+      if (compare(array1[i - 1], array2[j - 1])) {
+        arr[i][j] = arr[i - 1][j - 1] + 1;
+      } else {
+        arr[i][j] = Math.max(arr[i - 1][j], arr[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtracking
+  var result = [];
+  var i = length1, j = length2;
+  while (i > 0 && j > 0) {
+    if (compare(array1[i - 1], array2[j - 1])) {
+      result.unshift(collect(i - 1, j - 1));
+      i--;
+      j--;
+    } else {
+      if (arr[i - 1][j] > arr[i][j - 1]) {
+        i--;
+      } else {
+        j--;
+      }
+    }
+  }
+
+  return result;
+};
+
+
+/**
+ * Returns the sum of the arguments.
+ * @param {...number} var_args Numbers to add.
+ * @return {number} The sum of the arguments (0 if no arguments were provided,
+ *     {@code NaN} if any of the arguments is not a valid number).
+ */
+goog.math.sum = function(var_args) {
+  return /** @type {number} */ (goog.array.reduce(arguments,
+      function(sum, value) {
+        return sum + value;
+      }, 0));
+};
+
+
+/**
+ * Returns the arithmetic mean of the arguments.
+ * @param {...number} var_args Numbers to average.
+ * @return {number} The average of the arguments ({@code NaN} if no arguments
+ *     were provided or any of the arguments is not a valid number).
+ */
+goog.math.average = function(var_args) {
+  return goog.math.sum.apply(null, arguments) / arguments.length;
+};
+
+
+/**
+ * Returns the sample standard deviation of the arguments.  For a definition of
+ * sample standard deviation, see e.g.
+ * http://en.wikipedia.org/wiki/Standard_deviation
+ * @param {...number} var_args Number samples to analyze.
+ * @return {number} The sample standard deviation of the arguments (0 if fewer
+ *     than two samples were provided, or {@code NaN} if any of the samples is
+ *     not a valid number).
+ */
+goog.math.standardDeviation = function(var_args) {
+  var sampleSize = arguments.length;
+  if (sampleSize < 2) {
+    return 0;
+  }
+
+  var mean = goog.math.average.apply(null, arguments);
+  var variance = goog.math.sum.apply(null, goog.array.map(arguments,
+      function(val) {
+        return Math.pow(val - mean, 2);
+      })) / (sampleSize - 1);
+
+  return Math.sqrt(variance);
+};
+
+
+/**
+ * Returns whether the supplied number represents an integer, i.e. that is has
+ * no fractional component.  No range-checking is performed on the number.
+ * @param {number} num The number to test.
+ * @return {boolean} Whether {@code num} is an integer.
+ */
+goog.math.isInt = function(num) {
+  return isFinite(num) && num % 1 == 0;
+};
+
+
+/**
+ * Returns whether the supplied number is finite and not NaN.
+ * @param {number} num The number to test.
+ * @return {boolean} Whether {@code num} is a finite number.
+ */
+goog.math.isFiniteNumber = function(num) {
+  return isFinite(num) && !isNaN(num);
+};
+// Copyright 2006 The Closure Library Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS-IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
  * @fileoverview A utility class for representing two-dimensional positions.
  */
 
 
 goog.provide('goog.math.Coordinate');
+
+goog.require('goog.math');
 
 
 
@@ -13890,6 +13978,7 @@ if (goog.DEBUG) {
   /**
    * Returns a nice string representing the coordinate.
    * @return {string} In the form (50, 73).
+   * @override
    */
   goog.math.Coordinate.prototype.toString = function() {
     return '(' + this.x + ', ' + this.y + ')';
@@ -13924,6 +14013,27 @@ goog.math.Coordinate.distance = function(a, b) {
   var dx = a.x - b.x;
   var dy = a.y - b.y;
   return Math.sqrt(dx * dx + dy * dy);
+};
+
+
+/**
+ * Returns the magnitude of a coordinate.
+ * @param {!goog.math.Coordinate} a A Coordinate.
+ * @return {number} The distance between the origin and {@code a}.
+ */
+goog.math.Coordinate.magnitude = function(a) {
+  return Math.sqrt(a.x * a.x + a.y * a.y);
+};
+
+
+/**
+ * Returns the angle from the origin to a coordinate.
+ * @param {!goog.math.Coordinate} a A Coordinate.
+ * @return {number} The angle, in degrees, clockwise from the positive X
+ *     axis to {@code a}.
+ */
+goog.math.Coordinate.azimuth = function(a) {
+  return goog.math.angle(0, 0, a.x, a.y);
 };
 
 
@@ -13994,7 +14104,7 @@ goog.math.Coordinate.sum = function(a, b) {
  */
 
 
-// TODO(user): Rename/refactor getTextContent and getRawTextContent. The problem
+// TODO(arv): Rename/refactor getTextContent and getRawTextContent. The problem
 // is that getTextContent should mimic the DOM3 textContent. We should add a
 // getInnerText (or getText) which tries to return the visible text, innerText.
 
@@ -14059,7 +14169,7 @@ goog.dom.NodeType = {
 
 /**
  * Gets the DomHelper object for the document where the element resides.
- * @param {Node|Window=} opt_element If present, gets the DomHelper for this
+ * @param {(Node|Window)=} opt_element If present, gets the DomHelper for this
  *     element.
  * @return {!goog.dom.DomHelper} The DomHelper.
  */
@@ -14124,7 +14234,7 @@ goog.dom.$ = goog.dom.getElement;
  *
  * @param {?string=} opt_tag Element tag name.
  * @param {?string=} opt_class Optional class name.
- * @param {Document|Element=} opt_el Optional element to look in.
+ * @param {(Document|Element)=} opt_el Optional element to look in.
  * @return { {length: number} } Array-like list of elements (only a length
  *     property and numerical indices are guaranteed to exist).
  */
@@ -14137,8 +14247,8 @@ goog.dom.getElementsByTagNameAndClass = function(opt_tag, opt_class, opt_el) {
 /**
  * Returns an array of all the elements with the provided className.
  * @see {goog.dom.query}
- * @param {!string} className the name of the class to look for.
- * @param {Document|Element=} opt_el Optional element to look in.
+ * @param {string} className the name of the class to look for.
+ * @param {(Document|Element)=} opt_el Optional element to look in.
  * @return { {length: number} } The items found with the class name provided.
  */
 goog.dom.getElementsByClass = function(className, opt_el) {
@@ -14156,7 +14266,7 @@ goog.dom.getElementsByClass = function(className, opt_el) {
 /**
  * Returns the first element with the provided className.
  * @see {goog.dom.query}
- * @param {!string} className the name of the class to look for.
+ * @param {string} className the name of the class to look for.
  * @param {Element|Document=} opt_el Optional element to look in.
  * @return {Element} The first item with the class name provided.
  */
@@ -14174,18 +14284,13 @@ goog.dom.getElementByClass = function(className, opt_el) {
 
 /**
  * Prefer the standardized (http://www.w3.org/TR/selectors-api/), native and
- * fast W3C Selectors API. However, the version of WebKit that shipped with
- * Safari 3.1 and Chrome has a bug where it will not correctly match mixed-
- * case class name selectors in quirks mode.
- * @param {!Element|Document} parent The parent document object.
+ * fast W3C Selectors API.
+ * @param {!(Element|Document)} parent The parent document object.
  * @return {boolean} whether or not we can use parent.querySelector* APIs.
  * @private
  */
 goog.dom.canUseQuerySelector_ = function(parent) {
-  return parent.querySelectorAll &&
-         parent.querySelector &&
-         (!goog.userAgent.WEBKIT || goog.dom.isCss1CompatMode_(document) ||
-          goog.userAgent.isVersion('528'));
+  return !!(parent.querySelectorAll && parent.querySelector);
 };
 
 
@@ -14194,7 +14299,7 @@ goog.dom.canUseQuerySelector_ = function(parent) {
  * @param {!Document} doc The document to get the elements in.
  * @param {?string=} opt_tag Element tag name.
  * @param {?string=} opt_class Optional class name.
- * @param {Document|Element=} opt_el Optional element to look in.
+ * @param {(Document|Element)=} opt_el Optional element to look in.
  * @return { {length: number} } Array-like list of elements (only a length
  *     property and numerical indices are guaranteed to exist).
  * @private
@@ -14282,6 +14387,9 @@ goog.dom.setProperties = function(element, properties) {
       element.htmlFor = val;
     } else if (key in goog.dom.DIRECT_ATTRIBUTE_MAP_) {
       element.setAttribute(goog.dom.DIRECT_ATTRIBUTE_MAP_[key], val);
+    } else if (goog.string.startsWith(key, 'aria-') ||
+        goog.string.startsWith(key, 'data-')) {
+      element.setAttribute(key, val);
     } else {
       element[key] = val;
     }
@@ -14301,14 +14409,15 @@ goog.dom.DIRECT_ATTRIBUTE_MAP_ = {
   'cellpadding': 'cellPadding',
   'cellspacing': 'cellSpacing',
   'colspan': 'colSpan',
-  'rowspan': 'rowSpan',
-  'valign': 'vAlign',
-  'height': 'height',
-  'width': 'width',
-  'usemap': 'useMap',
   'frameborder': 'frameBorder',
+  'height': 'height',
   'maxlength': 'maxLength',
-  'type': 'type'
+  'role': 'role',
+  'rowspan': 'rowSpan',
+  'type': 'type',
+  'usemap': 'useMap',
+  'valign': 'vAlign',
+  'width': 'width'
 };
 
 
@@ -14378,7 +14487,7 @@ goog.dom.DIRECT_ATTRIBUTE_MAP_ = {
  * @return {!goog.math.Size} Object with values 'width' and 'height'.
  */
 goog.dom.getViewportSize = function(opt_window) {
-  // TODO(user): This should not take an argument
+  // TODO(arv): This should not take an argument
   return goog.dom.getViewportSize_(opt_window || window);
 };
 
@@ -14391,29 +14500,7 @@ goog.dom.getViewportSize = function(opt_window) {
  */
 goog.dom.getViewportSize_ = function(win) {
   var doc = win.document;
-
-  if (goog.userAgent.WEBKIT && !goog.userAgent.isVersion('500') &&
-      !goog.userAgent.MOBILE) {
-    // TODO(user): Sometimes we get something that isn't a valid window
-    // object. In this case we just revert to the current window. We need to
-    // figure out when this happens and find a real fix for it.
-    // See the comments on goog.dom.getWindow.
-    if (typeof win.innerHeight == 'undefined') {
-      win = window;
-    }
-    var innerHeight = win.innerHeight;
-    var scrollHeight = win.document.documentElement.scrollHeight;
-
-    if (win == win.top) {
-      if (scrollHeight < innerHeight) {
-        innerHeight -= 15; // Scrollbars are 15px wide on Mac
-      }
-    }
-    return new goog.math.Size(win.innerWidth, innerHeight);
-  }
-
   var el = goog.dom.isCss1CompatMode_(doc) ? doc.documentElement : doc.body;
-
   return new goog.math.Size(el.clientWidth, el.clientHeight);
 };
 
@@ -14439,7 +14526,7 @@ goog.dom.getDocumentHeight = function() {
  * @return {number} The height of the document of the given window.
  */
 goog.dom.getDocumentHeight_ = function(win) {
-  // NOTE(user): This method will return the window size rather than the document
+  // NOTE(eae): This method will return the window size rather than the document
   // size in webkit quirks mode.
   var doc = win.document;
   var height = 0;
@@ -14565,10 +14652,10 @@ goog.dom.getDocumentScrollElement_ = function(doc) {
  * Gets the window object associated with the given document.
  *
  * @param {Document=} opt_doc  Document object to get window for.
- * @return {Window} The window associated with the given document.
+ * @return {!Window} The window associated with the given document.
  */
 goog.dom.getWindow = function(opt_doc) {
-  // TODO(user): This should not take an argument.
+  // TODO(arv): This should not take an argument.
   return opt_doc ? goog.dom.getWindow_(opt_doc) : window;
 };
 
@@ -14595,11 +14682,11 @@ goog.dom.getWindow_ = function(doc) {
  * would return a div with two child paragraphs
  *
  * @param {string} tagName Tag to create.
- * @param {Object|Array.<string>|string=} opt_attributes If object, then a map
+ * @param {(Object|Array.<string>|string)=} opt_attributes If object, then a map
  *     of name-value pairs for attributes. If a string, then this is the
  *     className of the new element. If an array, the elements will be joined
  *     together as the className of the new element.
- * @param {...Object|string|Array|NodeList} var_args Further DOM nodes or
+ * @param {...(Object|string|Array|NodeList)} var_args Further DOM nodes or
  *     strings for text nodes. If one of the var_args is an array or NodeList,i
  *     its elements will be added as childNodes instead.
  * @return {!Element} Reference to a DOM node.
@@ -14684,12 +14771,12 @@ goog.dom.append_ = function(doc, parent, args, startIndex) {
 
   for (var i = startIndex; i < args.length; i++) {
     var arg = args[i];
-    // TODO(user): Fix isArrayLike to return false for a text node.
+    // TODO(attila): Fix isArrayLike to return false for a text node.
     if (goog.isArrayLike(arg) && !goog.dom.isNodeLike(arg)) {
       // If the argument is a node list, not a real array, use a clone,
       // because forEach can't be used to mutate a NodeList.
       goog.array.forEach(goog.dom.isNodeList(arg) ?
-          goog.array.clone(arg) : arg,
+          goog.array.toArray(arg) : arg,
           childHandler);
     } else {
       childHandler(arg);
@@ -14701,10 +14788,10 @@ goog.dom.append_ = function(doc, parent, args, startIndex) {
 /**
  * Alias for {@code createDom}.
  * @param {string} tagName Tag to create.
- * @param {string|Object=} opt_attributes If object, then a map of name-value
+ * @param {(string|Object)=} opt_attributes If object, then a map of name-value
  *     pairs for attributes. If a string, then this is the className of the new
  *     element.
- * @param {...Object|string|Array|NodeList} var_args Further DOM nodes or
+ * @param {...(Object|string|Array|NodeList)} var_args Further DOM nodes or
  *     strings for text nodes. If one of the var_args is an array, its
  *     children will be added as childNodes instead.
  * @return {!Element} Reference to a DOM node.
@@ -15011,8 +15098,8 @@ goog.dom.replaceNode = function(newNode, oldNode) {
  * Does nothing if the element is not in the document.
  * @param {Element} element The element to flatten.
  * @return {Element|undefined} The original element, detached from the document
- *     tree, sans children; or undefined, if the element was not in the
- *     document to begin with.
+ *     tree, sans children; or undefined, if the element was not in the document
+ *     to begin with.
  */
 goog.dom.flattenElement = function(element) {
   var child, parent = element.parentNode;
@@ -15036,7 +15123,7 @@ goog.dom.flattenElement = function(element) {
 /**
  * Returns an array containing just the element children of the given element.
  * @param {Element} element The element whose element children we want.
- * @return {Array|NodeList} An array or array-like list of just the element
+ * @return {!(Array|NodeList)} An array or array-like list of just the element
  *     children of the given element.
  */
 goog.dom.getChildren = function(element) {
@@ -15181,6 +15268,16 @@ goog.dom.isNodeLike = function(obj) {
 
 
 /**
+ * Whether the object looks like an Element.
+ * @param {*} obj The object being tested for Element likeness.
+ * @return {boolean} Whether the object looks like an Element.
+ */
+goog.dom.isElement = function(obj) {
+  return goog.isObject(obj) && obj.nodeType == goog.dom.NodeType.ELEMENT;
+};
+
+
+/**
  * Returns true if the specified value is a Window object. This includes the
  * global window for HTML pages, and iframe windows.
  * @param {*} obj Variable to test.
@@ -15188,6 +15285,20 @@ goog.dom.isNodeLike = function(obj) {
  */
 goog.dom.isWindow = function(obj) {
   return goog.isObject(obj) && obj['window'] == obj;
+};
+
+
+/**
+ * Returns an element's parent, if it's an Element.
+ * @param {Element} element The DOM element.
+ * @return {Element} The parent, or null if not an Element.
+ */
+goog.dom.getParentElement = function(element) {
+  if (goog.dom.BrowserFeature.CAN_USE_PARENT_ELEMENT_PROPERTY) {
+    return element.parentElement;
+  }
+  var parent = element.parentNode;
+  return goog.dom.isElement(parent) ? (/** @type {!Element} */ parent) : null;
 };
 
 
@@ -15387,7 +15498,7 @@ goog.dom.findCommonAncestor = function(var_args) {
  * @return {!Document} The document owning the node.
  */
 goog.dom.getOwnerDocument = function(node) {
-  // TODO(user): Remove IE5 code.
+  // TODO(arv): Remove IE5 code.
   // IE5 uses document instead of ownerDocument
   return /** @type {!Document} */ (
       node.nodeType == goog.dom.NodeType.DOCUMENT ? node :
@@ -15401,19 +15512,14 @@ goog.dom.getOwnerDocument = function(node) {
  * @return {!Document} The frame content document.
  */
 goog.dom.getFrameContentDocument = function(frame) {
-  var doc;
-  if (goog.userAgent.WEBKIT) {
-    doc = (frame.document || frame.contentWindow.document);
-  } else {
-    doc = (frame.contentDocument || frame.contentWindow.document);
-  }
+  var doc = frame.contentDocument || frame.contentWindow.document;
   return doc;
 };
 
 
 /**
  * Cross-browser function for getting the window of a frame or iframe.
- * @param {HTMLIFrameElement|HTMLFrameElement} frame Frame element.
+ * @param {Element} frame Frame element.
  * @return {Window} The window associated with the given frame.
  */
 goog.dom.getFrameContentWindow = function(frame) {
@@ -15496,7 +15602,7 @@ goog.dom.findNode = function(root, p) {
 
  * @param {Node} root The root of the tree to search.
  * @param {function(Node) : boolean} p The filter function.
- * @return {Array.<Node>} The found nodes or an empty array if none are found.
+ * @return {!Array.<!Node>} The found nodes or an empty array if none are found.
  */
 goog.dom.findNodes = function(root, p) {
   var rv = [];
@@ -15510,7 +15616,7 @@ goog.dom.findNodes = function(root, p) {
  * using a depth first search.
  * @param {Node} root The root of the tree to search.
  * @param {function(Node) : boolean} p The filter function.
- * @param {Array.<Node>} rv The found nodes are added to this array.
+ * @param {!Array.<!Node>} rv The found nodes are added to this array.
  * @param {boolean} findOne If true we exit after the first found node.
  * @return {boolean} Whether the search is complete or not. True in case findOne
  *     is true and the node is found. False otherwise.
@@ -15518,7 +15624,8 @@ goog.dom.findNodes = function(root, p) {
  */
 goog.dom.findNodes_ = function(root, p, rv, findOne) {
   if (root != null) {
-    for (var i = 0, child; child = root.childNodes[i]; i++) {
+    var child = root.firstChild;
+    while (child) {
       if (p(child)) {
         rv.push(child);
         if (findOne) {
@@ -15528,6 +15635,7 @@ goog.dom.findNodes_ = function(root, p, rv, findOne) {
       if (goog.dom.findNodes_(child, p, rv, findOne)) {
         return true;
       }
+      child = child.nextSibling;
     }
   }
   return false;
@@ -15572,7 +15680,8 @@ goog.dom.isFocusableTabIndex = function(element) {
   var attrNode = element.getAttributeNode('tabindex'); // Must be lowercase!
   if (attrNode && attrNode.specified) {
     var index = element.tabIndex;
-    return goog.isNumber(index) && index >= 0;
+    // NOTE: IE9 puts tabIndex in 16-bit int, e.g. -2 is 65534.
+    return goog.isNumber(index) && index >= 0 && index < 32768;
   }
   return false;
 };
@@ -15591,6 +15700,11 @@ goog.dom.setFocusableTabIndex = function(element, enable) {
   if (enable) {
     element.tabIndex = 0;
   } else {
+    // Set tabIndex to -1 first, then remove it. This is a workaround for
+    // Safari (confirmed in version 4 on Windows). When removing the attribute
+    // without setting it to -1 first, the element remains keyboard focusable
+    // despite not having a tabIndex attribute anymore.
+    element.tabIndex = -1;
     element.removeAttribute('tabIndex'); // Must be camelCase!
   }
 };
@@ -15609,7 +15723,7 @@ goog.dom.setFocusableTabIndex = function(element, enable) {
  */
 goog.dom.getTextContent = function(node) {
   var textContent;
-  // Note(user): IE9, Opera, and Safara 3 support innerText but they include
+  // Note(arv): IE9, Opera, and Safari 3 support innerText but they include
   // text nodes in script tags. So we revert to use a user agent test here.
   if (goog.dom.BrowserFeature.CAN_USE_INNER_TEXT && ('innerText' in node)) {
     textContent = goog.string.canonicalizeNewlines(node.innerText);
@@ -15626,9 +15740,10 @@ goog.dom.getTextContent = function(node) {
   // Strip &#8203; entities. goog.format.insertWordBreaks inserts them in IE8.
   textContent = textContent.replace(/\u200B/g, '');
 
-  // Skip this replacement on IE, which automatically turns &nbsp; into ' '
-  // and / +/ into ' ' when reading innerText.
-  if (!goog.userAgent.IE) {
+  // Skip this replacement on old browsers with working innerText, which
+  // automatically turns &nbsp; into ' ' and / +/ into ' ' when reading
+  // innerText.
+  if (!goog.dom.BrowserFeature.CAN_USE_INNER_TEXT) {
     textContent = textContent.replace(/ +/g, ' ');
   }
   if (textContent != ' ') {
@@ -15769,7 +15884,7 @@ goog.dom.getNodeAtOffset = function(parent, offset, opt_result) {
  * @return {boolean} Whether the object is a NodeList.
  */
 goog.dom.isNodeList = function(val) {
-  // TODO(user): Now the isNodeList is part of goog.dom we can use
+  // TODO(attila): Now the isNodeList is part of goog.dom we can use
   // goog.userAgent to make this simpler.
   // A NodeList must have a length property of type 'number' on all platforms.
   if (val && typeof val.length == 'number') {
@@ -15795,20 +15910,23 @@ goog.dom.isNodeList = function(val) {
  * tag name and/or class name. If the passed element matches the specified
  * criteria, the element itself is returned.
  * @param {Node} element The DOM node to start with.
- * @param {?string=} opt_tag The tag name to match (or null/undefined to match
- *     any node regardless of tag name). Must be uppercase (goog.dom.TagName).
+ * @param {?(goog.dom.TagName|string)=} opt_tag The tag name to match (or
+ *     null/undefined to match only based on class name).
  * @param {?string=} opt_class The class name to match (or null/undefined to
- *     match any node regardless of class name).
- * @return {Node} The first ancestor that matches the passed criteria, or
- *     null if none match.
+ *     match only based on tag name).
+ * @return {Element} The first ancestor that matches the passed criteria, or
+ *     null if no match is found.
  */
 goog.dom.getAncestorByTagNameAndClass = function(element, opt_tag, opt_class) {
+  if (!opt_tag && !opt_class) {
+    return null;
+  }
   var tagName = opt_tag ? opt_tag.toUpperCase() : null;
-  return goog.dom.getAncestor(element,
+  return /** @type {Element} */ (goog.dom.getAncestor(element,
       function(node) {
         return (!tagName || node.nodeName == tagName) &&
                (!opt_class || goog.dom.classes.has(node, opt_class));
-      }, true);
+      }, true));
 };
 
 
@@ -15817,13 +15935,12 @@ goog.dom.getAncestorByTagNameAndClass = function(element, opt_tag, opt_class) {
  * class name. If the passed element matches the specified criteria, the
  * element itself is returned.
  * @param {Node} element The DOM node to start with.
- * @param {?string=} opt_class The class name to match (or null/undefined to
- *     match any node regardless of class name).
- * @return {Node} The first ancestor that matches the passed criteria, or
+ * @param {string} className The class name to match.
+ * @return {Element} The first ancestor that matches the passed criteria, or
  *     null if none match.
  */
-goog.dom.getAncestorByClass = function(element, opt_class) {
-  return goog.dom.getAncestorByTagNameAndClass(element, null, opt_class);
+goog.dom.getAncestorByClass = function(element, className) {
+  return goog.dom.getAncestorByTagNameAndClass(element, null, className);
 };
 
 
@@ -15856,6 +15973,28 @@ goog.dom.getAncestor = function(
     steps++;
   }
   // Reached the root of the DOM without a match
+  return null;
+};
+
+
+/**
+ * Determines the active element in the given document.
+ * @param {Document} doc The document to look in.
+ * @return {Element} The active element.
+ */
+goog.dom.getActiveElement = function(doc) {
+  try {
+    return doc && doc.activeElement;
+  } catch (e) {
+    // NOTE(nicksantos): Sometimes, evaluating document.activeElement in IE
+    // throws an exception. I'm not 100% sure why, but I suspect it chokes
+    // on document.activeElement if the activeElement has been recently
+    // removed from the DOM by a JS operation.
+    //
+    // We assume that an exception here simply means
+    // "there is no active element."
+  }
+
   return null;
 };
 
@@ -15937,7 +16076,7 @@ goog.dom.DomHelper.prototype.$ = goog.dom.DomHelper.prototype.getElement;
  *
  * @param {?string=} opt_tag Element tag name or * for all tags.
  * @param {?string=} opt_class Optional class name.
- * @param {Document|Element=} opt_el Optional element to look in.
+ * @param {(Document|Element)=} opt_el Optional element to look in.
  * @return { {length: number} } Array-like list of elements (only a length
  *     property and numerical indices are guaranteed to exist).
  */
@@ -15952,7 +16091,7 @@ goog.dom.DomHelper.prototype.getElementsByTagNameAndClass = function(opt_tag,
 /**
  * Returns an array of all the elements with the provided className.
  * @see {goog.dom.query}
- * @param {!string} className the name of the class to look for.
+ * @param {string} className the name of the class to look for.
  * @param {Element|Document=} opt_el Optional element to look in.
  * @return { {length: number} } The items found with the class name provided.
  */
@@ -15965,8 +16104,8 @@ goog.dom.DomHelper.prototype.getElementsByClass = function(className, opt_el) {
 /**
  * Returns the first element we find matching the provided class name.
  * @see {goog.dom.query}
- * @param {!string} className the name of the class to look for.
- * @param {Element|Document=} opt_el Optional element to look in.
+ * @param {string} className the name of the class to look for.
+ * @param {(Element|Document)=} opt_el Optional element to look in.
  * @return {Element} The first item found with the class name provided.
  */
 goog.dom.DomHelper.prototype.getElementByClass = function(className, opt_el) {
@@ -16005,7 +16144,7 @@ goog.dom.DomHelper.prototype.setProperties = goog.dom.setProperties;
  * @return {!goog.math.Size} Object with values 'width' and 'height'.
  */
 goog.dom.DomHelper.prototype.getViewportSize = function(opt_window) {
-  // TODO(user): This should not take an argument. That breaks the rule of a
+  // TODO(arv): This should not take an argument. That breaks the rule of a
   // a DomHelper representing a single frame/window/document.
   return goog.dom.getViewportSize(opt_window || this.getWindow());
 };
@@ -16062,7 +16201,7 @@ goog.dom.DomHelper.prototype.createDom = function(tagName,
 /**
  * Alias for {@code createDom}.
  * @param {string} tagName Tag to create.
- * @param {Object|string=} opt_attributes If object, then a map of name-value
+ * @param {(Object|string)=} opt_attributes If object, then a map of name-value
  *     pairs for attributes. If a string, then this is the className of the new
  *     element.
  * @param {...goog.dom.Appendable} var_args Further DOM nodes or strings for
@@ -16170,6 +16309,16 @@ goog.dom.DomHelper.prototype.getDocumentScroll = function() {
 
 
 /**
+ * Determines the active element in the given document.
+ * @param {Document=} opt_doc The document to look in.
+ * @return {Element} The active element.
+ */
+goog.dom.DomHelper.prototype.getActiveElement = function(opt_doc) {
+  return goog.dom.getActiveElement(opt_doc || this.document_);
+};
+
+
+/**
  * Appends a child to a node.
  * @param {Node} parent Parent.
  * @param {Node} child Child.
@@ -16186,6 +16335,16 @@ goog.dom.DomHelper.prototype.appendChild = goog.dom.appendChild;
  *     If this is an array like object then fields 0 to length - 1 are appended.
  */
 goog.dom.DomHelper.prototype.append = goog.dom.append;
+
+
+/**
+ * Determines if the given node can contain children, intended to be used for
+ * HTML generation.
+ *
+ * @param {Node} node The node to check.
+ * @return {boolean} Whether the node can contain children.
+ */
+goog.dom.DomHelper.prototype.canHaveChildren = goog.dom.canHaveChildren;
 
 
 /**
@@ -16214,6 +16373,18 @@ goog.dom.DomHelper.prototype.insertSiblingAfter = goog.dom.insertSiblingAfter;
 
 
 /**
+ * Insert a child at a given index. If index is larger than the number of child
+ * nodes that the parent currently has, the node is inserted as the last child
+ * node.
+ * @param {Element} parent The element into which to insert the child.
+ * @param {Node} child The element to insert.
+ * @param {number} index The index at which to insert the new child node. Must
+ *     not be negative.
+ */
+goog.dom.DomHelper.prototype.insertChildAt = goog.dom.insertChildAt;
+
+
+/**
  * Removes a node from its parent.
  * @param {Node} node The node to remove.
  * @return {Node} The node removed if removed; else, null.
@@ -16238,6 +16409,15 @@ goog.dom.DomHelper.prototype.replaceNode = goog.dom.replaceNode;
  *     document.
  */
 goog.dom.DomHelper.prototype.flattenElement = goog.dom.flattenElement;
+
+
+/**
+ * Returns an array containing just the element children of the given element.
+ * @param {Element} element The element whose element children we want.
+ * @return {!(Array|NodeList)} An array or array-like list of just the element
+ *     children of the given element.
+ */
+goog.dom.DomHelper.prototype.getChildren = goog.dom.getChildren;
 
 
 /**
@@ -16282,8 +16462,7 @@ goog.dom.DomHelper.prototype.getPreviousElementSibling =
  * @return {Node} The next node in the DOM tree, or null if this was the last
  *     node.
  */
-goog.dom.DomHelper.prototype.getNextNode =
-    goog.dom.getNextNode;
+goog.dom.DomHelper.prototype.getNextNode = goog.dom.getNextNode;
 
 
 /**
@@ -16292,8 +16471,7 @@ goog.dom.DomHelper.prototype.getNextNode =
  * @return {Node} The previous node in the DOM tree, or null if this was the
  *     first node.
  */
-goog.dom.DomHelper.prototype.getPreviousNode =
-    goog.dom.getPreviousNode;
+goog.dom.DomHelper.prototype.getPreviousNode = goog.dom.getPreviousNode;
 
 
 /**
@@ -16302,6 +16480,31 @@ goog.dom.DomHelper.prototype.getPreviousNode =
  * @return {boolean} Whether the object looks like a DOM node.
  */
 goog.dom.DomHelper.prototype.isNodeLike = goog.dom.isNodeLike;
+
+
+/**
+ * Whether the object looks like an Element.
+ * @param {*} obj The object being tested for Element likeness.
+ * @return {boolean} Whether the object looks like an Element.
+ */
+goog.dom.DomHelper.prototype.isElement = goog.dom.isElement;
+
+
+/**
+ * Returns true if the specified value is a Window object. This includes the
+ * global window for HTML pages, and iframe windows.
+ * @param {*} obj Variable to test.
+ * @return {boolean} Whether the variable is a window.
+ */
+goog.dom.DomHelper.prototype.isWindow = goog.dom.isWindow;
+
+
+/**
+ * Returns an element's parent, if it's an Element.
+ * @param {Element} element The DOM element.
+ * @return {Element} The parent, or null if not an Element.
+ */
+goog.dom.DomHelper.prototype.getParentElement = goog.dom.getParentElement;
 
 
 /**
@@ -16314,6 +16517,31 @@ goog.dom.DomHelper.prototype.contains = goog.dom.contains;
 
 
 /**
+ * Compares the document order of two nodes, returning 0 if they are the same
+ * node, a negative number if node1 is before node2, and a positive number if
+ * node2 is before node1.  Note that we compare the order the tags appear in the
+ * document so in the tree <b><i>text</i></b> the B node is considered to be
+ * before the I node.
+ *
+ * @param {Node} node1 The first node to compare.
+ * @param {Node} node2 The second node to compare.
+ * @return {number} 0 if the nodes are the same node, a negative number if node1
+ *     is before node2, and a positive number if node2 is before node1.
+ */
+goog.dom.DomHelper.prototype.compareNodeOrder = goog.dom.compareNodeOrder;
+
+
+/**
+ * Find the deepest common ancestor of the given nodes.
+ * @param {...Node} var_args The nodes to find a common ancestor of.
+ * @return {Node} The common ancestor of the nodes, or null if there is none.
+ *     null will only be returned if two or more of the nodes are from different
+ *     documents.
+ */
+goog.dom.DomHelper.prototype.findCommonAncestor = goog.dom.findCommonAncestor;
+
+
+/**
  * Returns the owner document for a node.
  * @param {Node} node The node to get the document for.
  * @return {!Document} The document owning the node.
@@ -16323,8 +16551,8 @@ goog.dom.DomHelper.prototype.getOwnerDocument = goog.dom.getOwnerDocument;
 
 /**
  * Cross browser function for getting the document element of an iframe.
- * @param {HTMLIFrameElement|HTMLFrameElement} iframe Iframe element.
- * @return {!HTMLDocument} The frame content document.
+ * @param {Element} iframe Iframe element.
+ * @return {!Document} The frame content document.
  */
 goog.dom.DomHelper.prototype.getFrameContentDocument =
     goog.dom.getFrameContentDocument;
@@ -16332,7 +16560,7 @@ goog.dom.DomHelper.prototype.getFrameContentDocument =
 
 /**
  * Cross browser function for getting the window of a frame or iframe.
- * @param {HTMLIFrameElement|HTMLFrameElement} frame Frame element.
+ * @param {Element} frame Frame element.
  * @return {Window} The window associated with the given frame.
  */
 goog.dom.DomHelper.prototype.getFrameContentWindow =
@@ -16349,11 +16577,20 @@ goog.dom.DomHelper.prototype.setTextContent = goog.dom.setTextContent;
 
 
 /**
+ * Gets the outerHTML of a node, which islike innerHTML, except that it
+ * actually contains the HTML of the node itself.
+ * @param {Element} element The element to get the HTML of.
+ * @return {string} The outerHTML of the given element.
+ */
+goog.dom.DomHelper.prototype.getOuterHtml = goog.dom.getOuterHtml;
+
+
+/**
  * Finds the first descendant node that matches the filter function. This does
  * a depth first search.
  * @param {Node} root The root of the tree to search.
  * @param {function(Node) : boolean} p The filter function.
- * @return {(Node, undefined)} The found node or undefined if none is found.
+ * @return {Node|undefined} The found node or undefined if none is found.
  */
 goog.dom.DomHelper.prototype.findNode = goog.dom.findNode;
 
@@ -16366,6 +16603,30 @@ goog.dom.DomHelper.prototype.findNode = goog.dom.findNode;
  * @return {Array.<Node>} The found nodes or an empty array if none are found.
  */
 goog.dom.DomHelper.prototype.findNodes = goog.dom.findNodes;
+
+
+/**
+ * Returns true if the element has a tab index that allows it to receive
+ * keyboard focus (tabIndex >= 0), false otherwise.  Note that form elements
+ * natively support keyboard focus, even if they have no tab index.
+ * @param {Element} element Element to check.
+ * @return {boolean} Whether the element has a tab index that allows keyboard
+ *     focus.
+ */
+goog.dom.DomHelper.prototype.isFocusableTabIndex = goog.dom.isFocusableTabIndex;
+
+
+/**
+ * Enables or disables keyboard focus support on the element via its tab index.
+ * Only elements for which {@link goog.dom.isFocusableTabIndex} returns true
+ * (or elements that natively support keyboard focus, like form elements) can
+ * receive keyboard focus.  See http://go/tabindex for more info.
+ * @param {Element} element Element whose tab index is to be changed.
+ * @param {boolean} enable Whether to set or remove a tab index on the element
+ *     that supports keyboard focus.
+ */
+goog.dom.DomHelper.prototype.setFocusableTabIndex =
+    goog.dom.setFocusableTabIndex;
 
 
 /**
@@ -16407,19 +16668,56 @@ goog.dom.DomHelper.prototype.getNodeTextOffset = goog.dom.getNodeTextOffset;
 
 
 /**
+ * Returns the node at a given offset in a parent node.  If an object is
+ * provided for the optional third parameter, the node and the remainder of the
+ * offset will stored as properties of this object.
+ * @param {Node} parent The parent node.
+ * @param {number} offset The offset into the parent node.
+ * @param {Object=} opt_result Object to be used to store the return value. The
+ *     return value will be stored in the form {node: Node, remainder: number}
+ *     if this object is provided.
+ * @return {Node} The node at the given offset.
+ */
+goog.dom.DomHelper.prototype.getNodeAtOffset = goog.dom.getNodeAtOffset;
+
+
+/**
+ * Returns true if the object is a {@code NodeList}.  To qualify as a NodeList,
+ * the object must have a numeric length property and an item function (which
+ * has type 'string' on IE for some reason).
+ * @param {Object} val Object to test.
+ * @return {boolean} Whether the object is a NodeList.
+ */
+goog.dom.DomHelper.prototype.isNodeList = goog.dom.isNodeList;
+
+
+/**
  * Walks up the DOM hierarchy returning the first ancestor that has the passed
  * tag name and/or class name. If the passed element matches the specified
  * criteria, the element itself is returned.
  * @param {Node} element The DOM node to start with.
- * @param {?string=} opt_tag The tag name to match (or null/undefined to match
- *     any node regardless of tag name). Must be uppercase (goog.dom.TagName).
+ * @param {?(goog.dom.TagName|string)=} opt_tag The tag name to match (or
+ *     null/undefined to match only based on class name).
  * @param {?string=} opt_class The class name to match (or null/undefined to
- *     match any node regardless of class name).
- * @return {Node} The first ancestor that matches the passed criteria, or
- *     null if none match.
+ *     match only based on tag name).
+ * @return {Element} The first ancestor that matches the passed criteria, or
+ *     null if no match is found.
  */
 goog.dom.DomHelper.prototype.getAncestorByTagNameAndClass =
     goog.dom.getAncestorByTagNameAndClass;
+
+
+/**
+ * Walks up the DOM hierarchy returning the first ancestor that has the passed
+ * class name. If the passed element matches the specified criteria, the
+ * element itself is returned.
+ * @param {Node} element The DOM node to start with.
+ * @param {string} class The class name to match.
+ * @return {Element} The first ancestor that matches the passed criteria, or
+ *     null if none match.
+ */
+goog.dom.DomHelper.prototype.getAncestorByClass =
+    goog.dom.getAncestorByClass;
 
 
 /**

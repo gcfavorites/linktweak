@@ -30,9 +30,15 @@ OPTIMIZE_OPTIONS = {
   }
 }
 
+task :default, 'optimize'
 task :default  => [:opera, :chrome]
+
+task :opera, 'optimize'
 task :opera    => OPERA_TARGETS
+
+task :chrome, 'optimize'
 task :chrome   => CHROME_TARGETS
+
 task :packages => PACKAGES
 
 rule(/^(?:opera|chrome)\/.+\.js$/u => ALL_SCRIPTS) do |t, args|
