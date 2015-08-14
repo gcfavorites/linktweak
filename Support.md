@@ -1,0 +1,1 @@
+If you have any problem about this extension, please report it using the comment form on this page (login required).
